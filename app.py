@@ -1,16 +1,12 @@
 """
-Cell Site Tower Floor Plan Maker — Full App (v5, embedded Fabric.js)
-====================================================================
+Cell Site Tower Floor Plan Maker — Full App (v5.1, order-fixed)
+================================================================
 Uses an embedded Fabric.js canvas via st.components.v1.html.
-No streamlit-drawable-canvas-fix — that component was causing the
+No streamlit-drawable-canvas-fix — that component caused the
 "object appears then disappears on every rerun" bug.
 
 Run:
     streamlit run app.py
-
-Dependencies (requirements.txt):
-    streamlit>=1.36.0
-    Pillow>=10.0.0
 
 Companion files:
     fabric_canvas.html     -> embedded Fabric.js editor
@@ -78,20 +74,18 @@ st.markdown(
 # ==================================================================
 def _init_state():
     defaults = {
-        "canvas_json": None,      # last known canvas JSON
+        "canvas_json": None,
         "object_names": {},
         "object_equip": {},
         "object_heights": {},
         "canvas_w": 1000,
         "canvas_h": 700,
-        "place_queue": [],        # pending placements
-        "canvas_key": 0,          # bump to reset the canvas
+        "place_queue": [],
+        "canvas_key": 0,
         "project_name": "Site-001",
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
-
-_init_state()
 
 
 def _bump_canvas():
@@ -99,155 +93,14 @@ def _bump_canvas():
 
 
 # ==================================================================
-# Sidebar
-# ==================================================================
-st.sidebar.title("🗼 Cell Site Planner")
-
-categories: dict[str, list[str]] = {}
-for k, v in EQUIPMENT_LIBRARY.items():
-    categories.setdefault(v["category"], []).append(k)
-
-st.sidebar.subheader("1. Add Equipment")
-category = st.sidebar.selectbox(
-    "Category", sorted(categories.keys()), key="sel_category"
-)
-equip_keys = categories[category]
-equip_labels = [EQUIPMENT_LIBRARY[k]["label"] for k in equip_keys]
-picked_label = st.sidebar.selectbox(
-    "Equipment", equip_labels, key="sel_equipment"
-)
-picked_key = equip_keys[equip_labels.index(picked_label)]
-picked_equip = EQUIPMENT_LIBRARY[picked_key]
-
-st.sidebar.caption(f"**{picked_equip['label']}** — {picked_equip['category']}")
-
-custom_w = st.sidebar.number_input(
-    "Footprint width (px)",
-    min_value=10, max_value=800,
-    value=int(picked_equip["w"]), step=5,
-    key=f"cw_{picked_key}",
-)
-custom_h = st.sidebar.number_input(
-    "Footprint depth (px)",
-    min_value=10, max_value=800,
-    value=int(picked_equip["h"]), step=5,
-    key=f"ch_{picked_key}",
-)
-custom_height = st.sidebar.number_input(
-    "3D height (m)",
-    min_value=0.1, max_value=300.0,
-    value=float(picked_equip["height_3d"]), step=0.1,
-    key=f"ch3d_{picked_key}",
-)
-
-if st.sidebar.button("➕ Add to canvas", use_container_width=True, type="primary"):
-    st.session_state.place_queue.append({
-        "key": picked_key,
-        "w": custom_w,
-        "h": custom_h,
-        "height_3d": custom_height,
-    })
-    # Bake the new object into the persisted canvas JSON *before* bumping,
-    # so the freshly rendered HTML contains it.
-    _apply_place_queue()
-    _bump_canvas()
-    st.rerun()
-
-st.sidebar.divider()
-
-st.sidebar.subheader("2. Editing Tools")
-drawing_mode = st.sidebar.selectbox(
-    "Default mode",
-    ["transform", "rect", "circle", "line", "text"],
-    index=0,
-    key="mode_select",
-)
-stroke_width = st.sidebar.slider("Stroke width", 1, 6, 2, key="sw")
-stroke_color = st.sidebar.color_picker("Stroke color", "#222222", key="sc")
-fill_color = st.sidebar.color_picker("Fill color", "#4A90D9", key="fc")
-bg_color = st.sidebar.color_picker("Background", "#ffffff", key="bgc")
-
-st.sidebar.divider()
-
-st.sidebar.subheader("3. Canvas")
-st.session_state.canvas_w = st.sidebar.number_input(
-    "Canvas width (px)", min_value=400, max_value=3000,
-    value=st.session_state.canvas_w, step=50, key="csw",
-)
-st.session_state.canvas_h = st.sidebar.number_input(
-    "Canvas height (px)", min_value=400, max_value=3000,
-    value=st.session_state.canvas_h, step=50, key="csh",
-)
-
-st.sidebar.divider()
-
-st.sidebar.subheader("4. Project")
-st.session_state.project_name = st.sidebar.text_input(
-    "Project name", value=st.session_state.project_name, key="pn"
-)
-
-col_clear, col_reset = st.sidebar.columns(2)
-with col_clear:
-    if st.button("🧹 Clear", use_container_width=True):
-        st.session_state.canvas_json = {"version": "5.3.0", "objects": []}
-        st.session_state.object_names = {}
-        st.session_state.object_equip = {}
-        st.session_state.object_heights = {}
-        _bump_canvas()
-        st.rerun()
-with col_reset:
-    if st.button("🔄 Reset view", use_container_width=True):
-        _bump_canvas()
-        st.rerun()
-
-# Export / Import
-export_payload = {
-    "project": st.session_state.project_name,
-    "saved_at": datetime.utcnow().isoformat() + "Z",
-    "canvas_json": st.session_state.canvas_json,
-    "object_names": st.session_state.object_names,
-    "object_equip": st.session_state.object_equip,
-    "object_heights": st.session_state.object_heights,
-    "canvas_w": st.session_state.canvas_w,
-    "canvas_h": st.session_state.canvas_h,
-}
-st.sidebar.download_button(
-    "💾 Export project (JSON)",
-    data=json.dumps(export_payload, indent=2),
-    file_name=f"{st.session_state.project_name}_floorplan.json",
-    mime="application/json",
-    use_container_width=True,
-)
-
-uploaded = st.sidebar.file_uploader(
-    "📂 Import project (JSON)", type=["json"], key="import_file"
-)
-if uploaded is not None:
-    try:
-        data = json.load(uploaded)
-        st.session_state.canvas_json = data.get("canvas_json") or {"objects": []}
-        st.session_state.object_names = data.get("object_names", {})
-        st.session_state.object_equip = data.get("object_equip", {})
-        st.session_state.object_heights = data.get("object_heights", {})
-        st.session_state.canvas_w = data.get("canvas_w", 1000)
-        st.session_state.canvas_h = data.get("canvas_h", 700)
-        st.session_state.project_name = data.get("project", "Site-001")
-        _bump_canvas()
-        st.sidebar.success("Project loaded.")
-        st.rerun()
-    except Exception as e:
-        st.sidebar.error(f"Load failed: {e}")
-
-
-# ==================================================================
-# Apply pending placements into canvas_json
+# Core helpers — MUST be defined before the sidebar uses them
 # ==================================================================
 def _apply_place_queue():
     """
     Convert every queued equipment placement into a Fabric *group*
     object and append it to st.session_state.canvas_json.
-    Groups are made of primitive shapes only (rect/circle/line/text),
-    so there's no async image loading and no blinking.
+    Groups use primitive shapes only (rect/circle/line/textbox),
+    so there is no async image loading and no blinking.
     """
     if not st.session_state.place_queue:
         return
@@ -309,21 +162,11 @@ def _apply_place_queue():
     st.session_state.place_queue = []
 
 
-# Apply any queue left over from a previous run before rendering.
-_apply_place_queue()
-
-
-# ==================================================================
-# Embedded Fabric.js canvas
-# ==================================================================
-FABRIC_HTML_PATH = Path(__file__).parent / "fabric_canvas.html"
-
-
 def _render_fabric_html(
     initial: dict, w: int, h: int, mode: str,
     stroke: str, fill: str, stroke_w: int, bg: str,
 ) -> str:
-    tpl = FABRIC_HTML_PATH.read_text(encoding="utf-8")
+    tpl = (Path(__file__).parent / "fabric_canvas.html").read_text(encoding="utf-8")
     return (tpl
             .replace("__INITIAL__", json.dumps(initial or {"objects": []}))
             .replace("__MODE__", mode)
@@ -336,7 +179,152 @@ def _render_fabric_html(
 
 
 # ==================================================================
-# Layout
+# Init session state + apply any leftover queue from previous run
+# ==================================================================
+_init_state()
+_apply_place_queue()  # safe: function is now defined above
+
+
+# ==================================================================
+# Sidebar
+# ==================================================================
+st.sidebar.title("🗼 Cell Site Planner")
+
+categories: dict[str, list[str]] = {}
+for k, v in EQUIPMENT_LIBRARY.items():
+    categories.setdefault(v["category"], []).append(k)
+
+st.sidebar.subheader("1. Add Equipment")
+category = st.sidebar.selectbox(
+    "Category", sorted(categories.keys()), key="sel_category"
+)
+equip_keys = categories[category]
+equip_labels = [EQUIPMENT_LIBRARY[k]["label"] for k in equip_keys]
+picked_label = st.sidebar.selectbox(
+    "Equipment", equip_labels, key="sel_equipment"
+)
+picked_key = equip_keys[equip_labels.index(picked_label)]
+picked_equip = EQUIPMENT_LIBRARY[picked_key]
+
+st.sidebar.caption(f"**{picked_equip['label']}** — {picked_equip['category']}")
+
+custom_w = st.sidebar.number_input(
+    "Footprint width (px)",
+    min_value=10, max_value=800,
+    value=int(picked_equip["w"]), step=5,
+    key=f"cw_{picked_key}",
+)
+custom_h = st.sidebar.number_input(
+    "Footprint depth (px)",
+    min_value=10, max_value=800,
+    value=int(picked_equip["h"]), step=5,
+    key=f"ch_{picked_key}",
+)
+custom_height = st.sidebar.number_input(
+    "3D height (m)",
+    min_value=0.1, max_value=300.0,
+    value=float(picked_equip["height_3d"]), step=0.1,
+    key=f"ch3d_{picked_key}",
+)
+
+if st.sidebar.button("➕ Add to canvas", use_container_width=True, type="primary"):
+    st.session_state.place_queue.append({
+        "key": picked_key,
+        "w": custom_w,
+        "h": custom_h,
+        "height_3d": custom_height,
+    })
+    _apply_place_queue()   # bake into canvas_json now
+    _bump_canvas()         # fresh iframe
+    st.rerun()
+
+st.sidebar.divider()
+
+st.sidebar.subheader("2. Editing Tools")
+drawing_mode = st.sidebar.selectbox(
+    "Default mode",
+    ["transform", "rect", "circle", "line", "text"],
+    index=0,
+    key="mode_select",
+)
+stroke_width = st.sidebar.slider("Stroke width", 1, 6, 2, key="sw")
+stroke_color = st.sidebar.color_picker("Stroke color", "#222222", key="sc")
+fill_color = st.sidebar.color_picker("Fill color", "#4A90D9", key="fc")
+bg_color = st.sidebar.color_picker("Background", "#ffffff", key="bgc")
+
+st.sidebar.divider()
+
+st.sidebar.subheader("3. Canvas")
+st.session_state.canvas_w = st.sidebar.number_input(
+    "Canvas width (px)", min_value=400, max_value=3000,
+    value=st.session_state.canvas_w, step=50, key="csw",
+)
+st.session_state.canvas_h = st.sidebar.number_input(
+    "Canvas height (px)", min_value=400, max_value=3000,
+    value=st.session_state.canvas_h, step=50, key="csh",
+)
+
+st.sidebar.divider()
+
+st.sidebar.subheader("4. Project")
+st.session_state.project_name = st.sidebar.text_input(
+    "Project name", value=st.session_state.project_name, key="pn"
+)
+
+col_clear, col_reset = st.sidebar.columns(2)
+with col_clear:
+    if st.button("🧹 Clear", use_container_width=True):
+        st.session_state.canvas_json = {"version": "5.3.0", "objects": []}
+        st.session_state.object_names = {}
+        st.session_state.object_equip = {}
+        st.session_state.object_heights = {}
+        _bump_canvas()
+        st.rerun()
+with col_reset:
+    if st.button("🔄 Reset view", use_container_width=True):
+        _bump_canvas()
+        st.rerun()
+
+export_payload = {
+    "project": st.session_state.project_name,
+    "saved_at": datetime.utcnow().isoformat() + "Z",
+    "canvas_json": st.session_state.canvas_json,
+    "object_names": st.session_state.object_names,
+    "object_equip": st.session_state.object_equip,
+    "object_heights": st.session_state.object_heights,
+    "canvas_w": st.session_state.canvas_w,
+    "canvas_h": st.session_state.canvas_h,
+}
+st.sidebar.download_button(
+    "💾 Export project (JSON)",
+    data=json.dumps(export_payload, indent=2),
+    file_name=f"{st.session_state.project_name}_floorplan.json",
+    mime="application/json",
+    use_container_width=True,
+)
+
+uploaded = st.sidebar.file_uploader(
+    "📂 Import project (JSON)", type=["json"], key="import_file"
+)
+if uploaded is not None:
+    try:
+        data = json.load(uploaded)
+        st.session_state.canvas_json = data.get("canvas_json") or {"objects": []}
+        st.session_state.object_names = data.get("object_names", {})
+        st.session_state.object_equip = data.get("object_equip", {})
+        st.session_state.object_heights = data.get("object_heights", {})
+        st.session_state.canvas_w = data.get("canvas_w", 1000)
+        st.session_state.canvas_h = data.get("canvas_h", 700)
+        st.session_state.project_name = data.get("project", "Site-001")
+        _bump_canvas()
+        st.sidebar.success("Project loaded.")
+        st.rerun()
+    except Exception as e:
+        st.sidebar.error(f"Load failed: {e}")
+
+
+# ==================================================================
+# Layout: canvas + object inspector
 # ==================================================================
 left, right = st.columns([3, 1], gap="medium")
 
@@ -356,10 +344,6 @@ with left:
         bg=bg_color,
     )
 
-    # The `key` argument forces Streamlit to re-mount the iframe whenever
-    # canvas_key changes — which is exactly what we want (Add / Clear /
-    # Import / Reset). Otherwise, the iframe persists across reruns and
-    # the Fabric state is preserved.
     components.html(
         html,
         height=st.session_state.canvas_h + 90,
@@ -372,14 +356,7 @@ with left:
         f"≈ {px_to_m(st.session_state.canvas_w)} × {px_to_m(st.session_state.canvas_h)} m"
     )
 
-    if st.button("🔄 Sync object list from canvas state (informational)"):
-        st.info("Canvas edits are preserved visually. To capture live "
-                "positions back into Python, see the note in the Help section.")
 
-
-# ==================================================================
-# Right panel — object list & measurements
-# ==================================================================
 with right:
     st.subheader("Objects & Measurements")
 
@@ -529,23 +506,23 @@ with st.expander("ℹ️ How to use", expanded=False):
            - **Delete** — remove selected objects.
            - **Undo / Redo** — full history.
         3. **Rename** objects and change **3D heights** on the right panel.
-        4. See the **3D preview** below — it reflects the catalog's 3D models.
+        4. See the **3D preview** below.
         5. **Export / Import** projects as JSON.
 
         ### Scale
         `20 px = 1 m`. All measurements in meters.
 
         ### Stability
-        The canvas is now a **self-contained Fabric.js instance** embedded
-        directly in the page. All drawing, dragging, rotating, and history
-        happen inside the iframe — Streamlit reruns no longer reset it.
+        The canvas is a self-contained Fabric.js instance embedded directly
+        in the page. All drawing, dragging, rotating, and history happen
+        inside the iframe — Streamlit reruns no longer reset it.
         Your objects only disappear when you click **Clear**, **Reset view**,
         or **Import**.
 
         ### Known limitation
         Live edits made *inside* the canvas (moving, rotating, resizing) are
         preserved visually but are **not** automatically pushed back to
-        Python. Export uses the last known Python-side state. If you need
+        Python. Export uses the last known Python-side snapshot. If you need
         bidirectional sync, this app would need a Custom Streamlit Component
         (CCv2) — a bigger architecture.
         """
