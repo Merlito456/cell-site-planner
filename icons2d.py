@@ -1,17 +1,26 @@
 """
 Top-view SVG icons for 2D floor plan symbols.
-Returns data URLs that Fabric.js can load directly.
+Uses base64 data URLs — immune to '#' fragment issues with hex colors.
 """
 
-import urllib.parse
+import base64
 
 
 def _svg(body: str, w: int = 100, h: int = 100) -> str:
+    """
+    Wrap an SVG body in a proper <svg> root with explicit width/height,
+    then base64-encode it as a data URL.
+    Base64 avoids the '#' character problem that silently truncates
+    percent-encoded SVGs.
+    """
     svg = (
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" '
-        f'width="{w}" height="{h}">{body}</svg>'
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'xmlns:xlink="http://www.w3.org/1999/xlink" '
+        f'viewBox="0 0 {w} {h}" width="{w}" height="{h}">'
+        f'{body}</svg>'
     )
-    return "data:image/svg+xml;utf8," + urllib.parse.quote(svg)
+    b64 = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return f"data:image/svg+xml;base64,{b64}"
 
 
 # ---------- TOWERS ----------
