@@ -170,4 +170,632 @@ function matte(color, rough = 0.9) {
     return matCache[k];
 }
 
-// ---------- Group
+// ---------- Group wrapper ----------
+function makeGroup(obj) {
+    const g = new THREE.Group();
+    g.userData = obj;
+    return g;
+}
+
+// ---------- Builders ----------
+function addMesh(parent, geo, mat, x, y, z, rx = 0, ry = 0, rz = 0) {
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(x, y, z);
+    m.rotation.set(rx, ry, rz);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    parent.add(m);
+    return m;
+}
+
+// --- Tower: lattice ---
+function buildLattice(w, d, h, color) {
+    const g = new THREE.Group();
+    const steelMat = metal(color, 0.45, 0.9);
+    const legT = Math.max(w * 0.035, 1.2);
+    const legH = h;
+    const legGeo = new THREE.BoxGeometry(legT, legH, legT);
+
+    const xInset = w * 0.34;
+    const zInset = d * 0.34;
+    const legPositions = [
+        [-xInset, -zInset], [ xInset, -zInset],
+        [-xInset,  zInset], [ xInset,  zInset],
+    ];
+    for (const [x, z] of legPositions) {
+        addMesh(g, legGeo, steelMat, x, legH / 2, z);
+    }
+
+    // horizontal braces
+    const braceThickness = legT * 0.6;
+    const braceGeoX = new THREE.BoxGeometry(w * 0.68, braceThickness, braceThickness);
+    const braceGeoZ = new THREE.BoxGeometry(braceThickness, braceThickness, d * 0.68);
+    const levels = 8;
+    for (let i = 1; i < levels; i++) {
+        const y = (legH / levels) * i;
+        addMesh(g, braceGeoX, steelMat, 0, y, -zInset);
+        addMesh(g, braceGeoX, steelMat, 0, y,  zInset);
+        addMesh(g, braceGeoZ, steelMat, -xInset, y, 0);
+        addMesh(g, braceGeoZ, steelMat,  xInset, y, 0);
+    }
+
+    // X-bracing on one face (visual only)
+    const diagLen = Math.hypot(w * 0.68, legH / levels);
+    const diagGeo = new THREE.BoxGeometry(diagLen, braceThickness * 0.7, braceThickness * 0.7);
+    const angle = Math.atan2(legH / levels, w * 0.68);
+    for (let i = 0; i < levels - 1; i++) {
+        const y0 = (legH / levels) * i + (legH / levels) / 2;
+        const m1 = addMesh(g, diagGeo, steelMat, 0, y0, -zInset);
+        m1.rotation.z =  angle;
+        const m2 = addMesh(g, diagGeo, steelMat, 0, y0, -zInset);
+        m2.rotation.z = -angle;
+    }
+    return g;
+}
+
+// --- Tower: monopole (tapered cylinder) ---
+function buildMonopole(w, h, color) {
+    const g = new THREE.Group();
+    const r = w * 0.28;
+    const geo = new THREE.CylinderGeometry(r * 0.55, r, h, 24, 1, false);
+    addMesh(g, geo, metal(color, 0.4, 0.9), 0, h / 2, 0);
+
+    // base plate
+    addMesh(
+        g,
+        new THREE.BoxGeometry(w * 0.9, 0.4, w * 0.9),
+        metal(0x333333, 0.6, 0.9),
+        0, 0.2, 0
+    );
+
+    // small flange rings
+    for (let i = 1; i <= 4; i++) {
+        const y = (h / 5) * i;
+        const rr = r * (1 - (y / h) * 0.45);
+        addMesh(
+            g,
+            new THREE.CylinderGeometry(rr + 0.3, rr + 0.3, 0.3, 20),
+            metal(0x222222, 0.5, 0.9),
+            0, y, 0
+        );
+    }
+    return g;
+}
+
+// --- Tower: guyed ---
+function buildGuyed(w, h, color) {
+    const g = new THREE.Group();
+    const r = w * 0.22;
+    const tower = new THREE.Mesh(
+        new THREE.CylinderGeometry(r * 0.4, r, h, 16),
+        metal(color, 0.45, 0.9)
+    );
+    tower.position.y = h / 2;
+    tower.castShadow = true;
+    g.add(tower);
+
+    // guy wires
+    const wireMat = new THREE.LineBasicMaterial({ color: 0x888888 });
+    const radius = w * 2.4;
+    for (let a = 0; a < 6; a++) {
+        const ang = (a / 6) * Math.PI * 2;
+        const pts = [
+            new THREE.Vector3(0, h * 0.98, 0),
+            new THREE.Vector3(Math.cos(ang) * radius, 0, Math.sin(ang) * radius)
+        ];
+        g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), wireMat));
+    }
+    return g;
+}
+
+// --- Rooftop pole ---
+function buildPole(w, h, color) {
+    const g = new THREE.Group();
+    const geo = new THREE.CylinderGeometry(w * 0.12, w * 0.15, h, 16);
+    addMesh(g, geo, metal(color, 0.4, 0.85), 0, h / 2, 0);
+    addMesh(
+        g,
+        new THREE.BoxGeometry(w * 0.6, 0.15, w * 0.6),
+        metal(0x333333, 0.6, 0.9),
+        0, 0.07, 0
+    );
+    return g;
+}
+
+// --- Cabinet (with doors, vents, plinth) ---
+function buildCabinet(w, d, h, color) {
+    const g = new THREE.Group();
+    const bodyMat = metal(color, 0.55, 0.55);
+    const trimMat = metal(0x3a3a3a, 0.6, 0.7);
+    const body = new THREE.Mesh(
+        new THREE.BoxGeometry(w, h, d), bodyMat
+    );
+    body.position.y = h / 2 + 0.15;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    g.add(body);
+
+    // plinth
+    addMesh(g, new THREE.BoxGeometry(w + 2, 0.3, d + 2), trimMat, 0, 0.15, 0);
+
+    // door split line
+    addMesh(
+        g,
+        new THREE.BoxGeometry(0.3, h * 0.9, 0.3),
+        trimMat,
+        0, h / 2 + 0.15, d / 2 + 0.02
+    );
+    // hinges
+    for (const side of [-1, 1]) {
+        for (const t of [0.3, 0.7]) {
+            addMesh(
+                g,
+                new THREE.BoxGeometry(0.6, 1.2, 0.4),
+                trimMat,
+                side * (w / 2 - 1.5), 0.15 + h * t, d / 2 + 0.05
+            );
+        }
+    }
+    // vent slots
+    for (let i = 0; i < 6; i++) {
+        addMesh(
+            g,
+            new THREE.BoxGeometry(w * 0.55, 0.35, 0.2),
+            trimMat,
+            0, h * 0.15 + i * 0.9, d / 2 + 0.06
+        );
+    }
+    // roof lip
+    addMesh(
+        g,
+        new THREE.BoxGeometry(w + 1.2, 0.35, d + 1.2),
+        trimMat,
+        0, 0.15 + h + 0.15, 0
+    );
+    return g;
+}
+
+// --- Rack ---
+function buildRack(w, d, h, color) {
+    const g = new THREE.Group();
+    const frameMat = metal(color, 0.5, 0.6);
+    const accentMat = metal(0x1a1a1a, 0.55, 0.5);
+
+    addMesh(g, new THREE.BoxGeometry(w, h, d), frameMat, 0, h / 2, 0);
+
+    // front panel with equipment units
+    const front = new THREE.Mesh(
+        new THREE.BoxGeometry(w * 0.92, h * 0.94, 0.3),
+        accentMat
+    );
+    front.position.set(0, h / 2, d / 2 + 0.16);
+    front.castShadow = true;
+    g.add(front);
+
+    // rack units
+    const units = Math.floor(h / 1.2);
+    for (let i = 0; i < units; i++) {
+        const y = 0.6 + i * 1.15;
+        if (y + 0.6 > h - 0.1) break;
+        addMesh(
+            g,
+            new THREE.BoxGeometry(w * 0.85, 0.75, 0.15),
+            metal(0x3a3a3a, 0.6, 0.5),
+            0, y, d / 2 + 0.33
+        );
+        // status LEDs
+        addMesh(
+            g,
+            new THREE.BoxGeometry(0.35, 0.2, 0.1),
+            new THREE.MeshStandardMaterial({
+                color: 0x4ade80, emissive: 0x22aa55, emissiveIntensity: 1.4
+            }),
+            w * 0.32, y, d / 2 + 0.42
+        );
+    }
+    return g;
+}
+
+// --- Cable ladder ---
+function buildLadder(w, d, h, color) {
+    const g = new THREE.Group();
+    const railMat = metal(color, 0.5, 0.85);
+    const railT = Math.max(d * 0.18, 0.6);
+    const rail1 = new THREE.Mesh(new THREE.BoxGeometry(w, railT, railT), railMat);
+    rail1.position.set(0, h + railT / 2, -d / 2 + railT / 2);
+    rail1.castShadow = true;
+    g.add(rail1);
+
+    const rail2 = rail1.clone();
+    rail2.position.z = d / 2 - railT / 2;
+    g.add(rail2);
+
+    // rungs
+    const step = Math.max(w / 14, 6);
+    for (let x = -w / 2 + step; x <= w / 2 - step; x += step) {
+        addMesh(
+            g,
+            new THREE.BoxGeometry(railT * 0.6, railT * 0.6, d - railT * 2),
+            railMat,
+            x, h + railT / 2, 0
+        );
+    }
+    return g;
+}
+
+// --- Basepad ---
+function buildBasepad(w, d, h, color) {
+    const g = new THREE.Group();
+    const slab = new THREE.Mesh(
+        new THREE.BoxGeometry(w, h, d),
+        matte(color, 0.95)
+    );
+    slab.position.y = h / 2;
+    slab.receiveShadow = true;
+    slab.castShadow = true;
+    g.add(slab);
+    return g;
+}
+
+// --- Fence (perimeter) ---
+function buildFence(w, d, h, color) {
+    const g = new THREE.Group();
+    const postMat = metal(color, 0.6, 0.7);
+    const meshMat = new THREE.MeshStandardMaterial({
+        color: 0xcccccc, roughness: 0.8, metalness: 0.4,
+        transparent: true, opacity: 0.35, side: THREE.DoubleSide
+    });
+
+    const postGeo = new THREE.BoxGeometry(0.5, h, 0.5);
+    const postEvery = 20;
+    const nX = Math.floor(w / postEvery);
+    const nZ = Math.floor(d / postEvery);
+
+    // front & back rows
+    for (let i = 0; i <= nX; i++) {
+        const x = -w / 2 + (i / nX) * w;
+        for (const z of [-d / 2, d / 2]) {
+            addMesh(g, postGeo, postMat, x, h / 2, z);
+        }
+    }
+    // left & right
+    for (let i = 0; i <= nZ; i++) {
+        const z = -d / 2 + (i / nZ) * d;
+        for (const x of [-w / 2, w / 2]) {
+            addMesh(g, postGeo, postMat, x, h / 2, z);
+        }
+    }
+    // panels
+    const panelH = h * 0.95;
+    const front = new THREE.Mesh(new THREE.PlaneGeometry(w, panelH), meshMat);
+    front.position.set(0, panelH / 2, -d / 2);
+    g.add(front);
+    const back = front.clone();
+    back.position.z = d / 2;
+    g.add(back);
+    const left = new THREE.Mesh(new THREE.PlaneGeometry(d, panelH), meshMat);
+    left.rotation.y = Math.PI / 2;
+    left.position.set(-w / 2, panelH / 2, 0);
+    g.add(left);
+    const right = left.clone();
+    right.position.x = w / 2;
+    g.add(right);
+    return g;
+}
+
+// --- Generator (enclosure + exhaust + control panel) ---
+function buildGenerator(w, d, h, color) {
+    const g = new THREE.Group();
+    const bodyMat = metal(color, 0.55, 0.35);
+    const darkMat = metal(0x1f1f1f, 0.6, 0.5);
+
+    // base skid
+    addMesh(g, new THREE.BoxGeometry(w * 1.02, 0.2, d * 1.02), darkMat, 0, 0.1, 0);
+
+    // main enclosure
+    const enclosure = new THREE.Mesh(
+        new THREE.BoxGeometry(w, h * 0.85, d), bodyMat
+    );
+    enclosure.position.y = 0.2 + (h * 0.85) / 2;
+    enclosure.castShadow = true;
+    enclosure.receiveShadow = true;
+    g.add(enclosure);
+
+    // curved roof
+    const roof = new THREE.Mesh(
+        new THREE.CylinderGeometry(d * 0.5, d * 0.5, w, 16, 1, false, 0, Math.PI),
+        bodyMat
+    );
+    roof.rotation.z = Math.PI / 2;
+    roof.position.set(0, 0.2 + h * 0.85, 0);
+    roof.scale.y = 0.6;
+    roof.castShadow = true;
+    g.add(roof);
+
+    // vents (louvers)
+    for (let i = 0; i < 5; i++) {
+        addMesh(
+            g,
+            new THREE.BoxGeometry(0.3, h * 0.6, d * 0.8),
+            darkMat,
+            w / 2 - 0.6 - i * 1.6, 0.2 + h * 0.45, 0
+        );
+    }
+
+    // exhaust pipe
+    const exhaust = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.5, 0.5, h * 0.9, 12),
+        darkMat
+    );
+    exhaust.position.set(-w * 0.3, 0.2 + h * 0.85 + h * 0.35, -d * 0.25);
+    exhaust.castShadow = true;
+    g.add(exhaust);
+
+    // control panel
+    addMesh(
+        g,
+        new THREE.BoxGeometry(w * 0.22, h * 0.35, 0.2),
+        darkMat,
+        w * 0.35, 0.2 + h * 0.5, d / 2 + 0.12
+    );
+    return g;
+}
+
+// --- Fuel tank (horizontal cylinder on saddles) ---
+function buildFuelTank(w, d, h, color) {
+    const g = new THREE.Group();
+    const r = Math.min(w, d) / 2;
+    const length = Math.max(w, d);
+    const tankMat = metal(color, 0.55, 0.7);
+
+    // rotate so cylinder lies along the longer axis
+    const along = w >= d ? "x" : "z";
+    const body = new THREE.Mesh(
+        new THREE.CylinderGeometry(r, r, length, 32),
+        tankMat
+    );
+    if (along === "x") body.rotation.z = Math.PI / 2;
+    else body.rotation.x = Math.PI / 2;
+    body.position.y = h / 2;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    g.add(body);
+
+    // end caps (spheres)
+    for (const s of [-1, 1]) {
+        const cap = new THREE.Mesh(new THREE.SphereGeometry(r, 24, 16), tankMat);
+        cap.position.set(along === "x" ? s * length / 2 : 0, h / 2,
+                         along === "z" ? s * length / 2 : 0);
+        cap.scale.setScalar(1);
+        cap.castShadow = true;
+        g.add(cap);
+    }
+
+    // saddle supports
+    const saddleMat = metal(0x3a3a3a, 0.7, 0.4);
+    for (const x of [-length * 0.3, length * 0.3]) {
+        addMesh(
+            g,
+            new THREE.BoxGeometry(2, h * 0.4, r * 1.6),
+            saddleMat,
+            along === "x" ? x : 0, h * 0.2,
+            along === "z" ? x : 0
+        );
+    }
+
+    // top vent / fill cap
+    addMesh(
+        g,
+        new THREE.CylinderGeometry(0.8, 0.8, 1.2, 12),
+        metal(0x222222, 0.6, 0.6),
+        0, h + 0.4, 0
+    );
+    return g;
+}
+
+// --- ATS Panel ---
+function buildATS(w, d, h, color) {
+    const g = new THREE.Group();
+    addMesh(g, new THREE.BoxGeometry(w, h, d), metal(color, 0.55, 0.4), 0, h / 2, 0);
+    // front indicator lights
+    const colors = [0x4ade80, 0xfbbf24, 0xef4444];
+    for (let i = 0; i < 3; i++) {
+        addMesh(
+            g,
+            new THREE.CylinderGeometry(0.3, 0.3, 0.15, 12),
+            new THREE.MeshStandardMaterial({
+                color: colors[i], emissive: colors[i], emissiveIntensity: 1.4
+            }),
+            -w * 0.25 + i * w * 0.25, h * 0.6, d / 2 + 0.05,
+            Math.PI / 2, 0, 0
+        );
+    }
+    addMesh(
+        g,
+        new THREE.BoxGeometry(w * 0.7, h * 0.15, 0.2),
+        metal(0x111111, 0.5, 0.4),
+        0, h * 0.25, d / 2 + 0.1
+    );
+    return g;
+}
+
+// --- Antenna panel ---
+function buildAntenna(w, d, h, color) {
+    const g = new THREE.Group();
+    const panelMat = new THREE.MeshStandardMaterial({
+        color, roughness: 0.5, metalness: 0.2
+    });
+    const backMat = metal(0x666666, 0.5, 0.7);
+
+    // radome (white panel) — height is 3D "height", thickness from footprint
+    const thickness = Math.max(w, d);
+    const panel = new THREE.Mesh(
+        new THREE.BoxGeometry(thickness, h, thickness * 0.6),
+        panelMat
+    );
+    panel.position.y = h / 2;
+    panel.castShadow = true;
+    g.add(panel);
+
+    // mounting bracket
+    addMesh(
+        g,
+        new THREE.BoxGeometry(thickness * 1.2, h * 0.15, thickness * 0.9),
+        backMat,
+        0, h * 0.5, -thickness * 0.4
+    );
+    addMesh(
+        g,
+        new THREE.BoxGeometry(thickness * 1.2, h * 0.15, thickness * 0.9),
+        backMat,
+        0, h * 0.85, -thickness * 0.4
+    );
+    return g;
+}
+
+// --- RRU ---
+function buildRRU(w, d, h, color) {
+    const g = new THREE.Group();
+    const bodyMat = metal(color, 0.5, 0.55);
+    const ribMat = metal(0x2a2a2a, 0.6, 0.4);
+
+    const t = Math.max(w, d);
+    const body = new THREE.Mesh(
+        new THREE.BoxGeometry(t, h, t * 0.55), bodyMat
+    );
+    body.position.y = h / 2;
+    body.castShadow = true;
+    g.add(body);
+
+    // heat fins
+    const fins = 7;
+    for (let i = 0; i < fins; i++) {
+        addMesh(
+            g,
+            new THREE.BoxGeometry(t * 0.9, 0.06, 0.15),
+            ribMat,
+            0, h * 0.15 + i * (h * 0.7 / fins), t * 0.28
+        );
+    }
+    // connectors
+    addMesh(
+        g,
+        new THREE.CylinderGeometry(0.15, 0.15, 0.2, 8),
+        metal(0x111111, 0.5, 0.6),
+        -t * 0.25, h * 0.1, t * 0.3, Math.PI / 2, 0, 0
+    );
+    return g;
+}
+
+// --- Generic box (custom) ---
+function buildBox(w, d, h, color) {
+    const g = new THREE.Group();
+    const m = new THREE.Mesh(
+        new THREE.BoxGeometry(w, h, d),
+        matte(color, 0.85)
+    );
+    m.position.y = h / 2;
+    m.castShadow = true;
+    m.receiveShadow = true;
+    g.add(m);
+    return g;
+}
+
+// ---------- Dispatch ----------
+function buildObject(it) {
+    const {detail, width, depth, height, color} = it;
+    switch (detail) {
+        case "lattice":    return buildLattice(width, depth, height, color);
+        case "monopole":   return buildMonopole(width, height, color);
+        case "guyed":      return buildGuyed(width, height, color);
+        case "pole":       return buildPole(width, height, color);
+        case "cabinet":    return buildCabinet(width, depth, height, color);
+        case "rack":       return buildRack(width, depth, height, color);
+        case "ladder":     return buildLadder(width, depth, height, color);
+        case "basepad":    return buildBasepad(width, depth, height, color);
+        case "fence":      return buildFence(width, depth, height, color);
+        case "generator":  return buildGenerator(width, depth, height, color);
+        case "fuel_tank":  return buildFuelTank(width, depth, height, color);
+        case "ats":        return buildATS(width, depth, height, color);
+        case "antenna":    return buildAntenna(width, depth, height, color);
+        case "rru":        return buildRRU(width, depth, height, color);
+        default:           return buildBox(width, depth, height, color);
+    }
+}
+
+// ---------- Labels ----------
+function makeLabel(text) {
+    const c = document.createElement('canvas');
+    c.width = 512; c.height = 128;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = 'rgba(15,17,22,0.85)';
+    ctx.fillRect(0,0,512,128);
+    ctx.strokeStyle = '#5a5f68';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(2,2,508,124);
+    ctx.fillStyle = '#f0f0f0';
+    ctx.font = 'bold 42px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText((text || '').substring(0, 24), 256, 64);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const mat = new THREE.SpriteMaterial({
+        map: tex, depthTest: false, transparent: true
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(60, 15, 1);
+    return sprite;
+}
+
+// ---------- Build scene ----------
+const items = __DATA__;
+
+// Fit camera to bounding box
+if (items.length > 0) {
+    let maxDim = 200;
+    items.forEach(it => {
+        maxDim = Math.max(maxDim,
+            Math.abs(it.x) + it.width,
+            Math.abs(it.z) + it.depth,
+            it.height * 1.2);
+    });
+    const dist = maxDim * 1.6;
+    camera.position.set(dist * 0.9, dist * 0.7, dist * 1.0);
+    controls.target.set(0, Math.min(20, maxDim * 0.15), 0);
+    controls.update();
+}
+
+items.forEach(it => {
+    const group = buildObject(it);
+    group.position.set(it.x, 0, it.z);
+    group.rotation.y = -it.angle * Math.PI / 180;
+    scene.add(group);
+
+    // label above object
+    const labelY = Math.max(it.height + 6, 8);
+    const label = makeLabel(it.name);
+    label.position.set(it.x, labelY, it.z);
+    scene.add(label);
+});
+
+// ---------- Resize ----------
+function onResize() {
+    const w = canvasEl.clientWidth;
+    camera.aspect = w / H;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, H, false);
+}
+window.addEventListener('resize', onResize);
+
+// ---------- Loop ----------
+function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
+"""
