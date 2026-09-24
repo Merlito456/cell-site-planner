@@ -1,6 +1,6 @@
 """
-Generates a self-contained Three.js HTML string for the 3D preview.
-Extrudes every 2D canvas object into a 3D box (or cylinder for circles).
+Realistic Three.js 3D preview.
+Each equipment type is built from composed geometry (not just a box).
 """
 
 import json
@@ -9,18 +9,15 @@ from equipment_library import EQUIPMENT_LIBRARY
 
 def build_3d_html(objects_2d: list, canvas_w: int, canvas_h: int) -> str:
     scene_data = []
-
     for obj in objects_2d or []:
         equip_key = obj.get("equipment_type", "custom_box")
         equip = EQUIPMENT_LIBRARY.get(equip_key, EQUIPMENT_LIBRARY["custom_box"])
 
-        w = (obj.get("width") or equip["w"]) * obj.get("scaleX", 1)
-        h = (obj.get("height") or equip["h"]) * obj.get("scaleY", 1)
+        w = (obj.get("width") or (obj.get("radius", 0) * 2)) * obj.get("scaleX", 1)
+        h = (obj.get("height") or (obj.get("radius", 0) * 2)) * obj.get("scaleY", 1)
         left = obj.get("left", 0)
         top = obj.get("top", 0)
 
-        # Convert canvas coords (origin = top-left of object bounding box)
-        # to a centered coordinate system for Three.js
         cx = left + w / 2 - canvas_w / 2
         cz = top + h / 2 - canvas_h / 2
 
@@ -28,6 +25,7 @@ def build_3d_html(objects_2d: list, canvas_w: int, canvas_h: int) -> str:
             "kind": obj.get("type", "rect"),
             "name": obj.get("name") or equip["label"],
             "equipment_type": equip_key,
+            "detail": equip.get("detail", "box"),
             "width": w,
             "depth": h,
             "height": equip["height_3d"],
@@ -39,133 +37,137 @@ def build_3d_html(objects_2d: list, canvas_w: int, canvas_h: int) -> str:
 
     data_json = json.dumps(scene_data)
 
-    return f"""
+    return _HTML_TEMPLATE.replace("__DATA__", data_json)
+
+
+_HTML_TEMPLATE = r"""
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8" />
 <style>
-    html, body {{ margin:0; padding:0; overflow:hidden; background:#1e1e24; }}
-    #c {{ width:100%; height:520px; display:block; }}
-    .hint {{
-        position:absolute; top:8px; left:8px; color:#ddd;
+    html, body { margin:0; padding:0; overflow:hidden; background:#0f1116; }
+    #c { width:100%; height:560px; display:block; }
+    .hint {
+        position:absolute; top:10px; left:10px; color:#eaeaea;
         font-family: system-ui, sans-serif; font-size:12px;
-        background:rgba(0,0,0,0.4); padding:6px 10px; border-radius:6px;
-        pointer-events:none;
-    }}
+        background:rgba(0,0,0,0.55); padding:6px 10px; border-radius:6px;
+        pointer-events:none; z-index:10;
+    }
+    .loading {
+        position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+        color:#aaa; font-family: system-ui, sans-serif; font-size:14px;
+    }
 </style>
 <script type="importmap">
-{{
-  "imports": {{
+{
+  "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
     "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-  }}
-}}
+  }
+}
 </script>
 </head>
 <body>
-<div class="hint">Left-drag: rotate &nbsp;|&nbsp; Right-drag: pan &nbsp;|&nbsp; Scroll: zoom</div>
+<div class="hint">Left-drag rotate &nbsp;|&nbsp; Right-drag pan &nbsp;|&nbsp; Scroll zoom</div>
 <canvas id="c"></canvas>
 <script type="module">
 import * as THREE from 'three';
-import {{ OrbitControls }} from 'three/addons/controls/OrbitControls.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
-const container = document.getElementById('c');
-const W = container.clientWidth;
-const H = 520;
+// ---------- Renderer ----------
+const canvasEl = document.getElementById('c');
+const W = canvasEl.clientWidth;
+const H = 560;
 
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x1e1e24);
-
-const camera = new THREE.PerspectiveCamera(55, W/H, 0.1, 5000);
-camera.position.set(400, 350, 500);
-
-const renderer = new THREE.WebGLRenderer({{ canvas: container, antialias: true }});
+const renderer = new THREE.WebGLRenderer({
+    canvas: canvasEl, antialias: true, alpha: false
+});
 renderer.setSize(W, H, false);
-renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+// ---------- Scene ----------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0f1116);
+scene.fog = new THREE.Fog(0x0f1116, 900, 2400);
+
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+// ---------- Camera ----------
+const camera = new THREE.PerspectiveCamera(50, W/H, 0.5, 8000);
+camera.position.set(420, 320, 520);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
-controls.target.set(0, 0, 0);
+controls.maxPolarAngle = Math.PI / 2.02;
+controls.target.set(0, 15, 0);
 
-// Lighting
-scene.add(new THREE.AmbientLight(0xffffff, 0.7));
-const dir = new THREE.DirectionalLight(0xffffff, 1.0);
-dir.position.set(300, 500, 200);
-scene.add(dir);
-const dir2 = new THREE.DirectionalLight(0xffffff, 0.35);
-dir2.position.set(-300, 300, -200);
-scene.add(dir2);
+// ---------- Lights ----------
+const hemi = new THREE.HemisphereLight(0xbfd3ff, 0x1a1a1f, 0.6);
+scene.add(hemi);
 
-// Ground grid
-const grid = new THREE.GridHelper(2000, 100, 0x555555, 0x333333);
-grid.position.y = 0;
+const sun = new THREE.DirectionalLight(0xffffff, 2.4);
+sun.position.set(300, 500, 260);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.near = 10;
+sun.shadow.camera.far = 1500;
+sun.shadow.camera.left = -700;
+sun.shadow.camera.right = 700;
+sun.shadow.camera.top = 700;
+sun.shadow.camera.bottom = -700;
+sun.shadow.bias = -0.0004;
+scene.add(sun);
+
+const fill = new THREE.DirectionalLight(0xaaccff, 0.4);
+fill.position.set(-400, 200, -300);
+scene.add(fill);
+
+// ---------- Ground ----------
+const groundGeo = new THREE.PlaneGeometry(4000, 4000);
+const groundMat = new THREE.MeshStandardMaterial({
+    color: 0x2a2d34, roughness: 0.95, metalness: 0.0
+});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.02;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// subtle grid
+const grid = new THREE.GridHelper(2000, 100, 0x4a4d55, 0x2e3138);
+grid.material.opacity = 0.35;
+grid.material.transparent = true;
+grid.position.y = 0.01;
 scene.add(grid);
 
-// Ground plane
-const planeGeo = new THREE.PlaneGeometry(2000, 2000);
-const planeMat = new THREE.MeshLambertMaterial({{ color: 0x2a2a30, side: THREE.DoubleSide }});
-const plane = new THREE.Mesh(planeGeo, planeMat);
-plane.rotation.x = -Math.PI / 2;
-plane.position.y = -0.01;
-scene.add(plane);
+// ---------- Materials cache ----------
+const matCache = {};
+function metal(color, rough = 0.55, met = 0.85) {
+    const k = `m_${color}_${rough}_${met}`;
+    if (!matCache[k]) {
+        matCache[k] = new THREE.MeshStandardMaterial({
+            color, roughness: rough, metalness: met
+        });
+    }
+    return matCache[k];
+}
+function matte(color, rough = 0.9) {
+    const k = `f_${color}_${rough}`;
+    if (!matCache[k]) {
+        matCache[k] = new THREE.MeshStandardMaterial({
+            color, roughness: rough, metalness: 0.05
+        });
+    }
+    return matCache[k];
+}
 
-// Equipment
-const items = {data_json};
-const meshes = [];
-
-function makeLabel(text) {{
-    const c = document.createElement('canvas');
-    c.width = 256; c.height = 64;
-    const ctx = c.getContext('2d');
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.fillRect(0,0,256,64);
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 22px system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(text.substring(0, 22), 128, 32);
-    const tex = new THREE.CanvasTexture(c);
-    const mat = new THREE.SpriteMaterial({{ map: tex, depthTest: false }});
-    const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(40, 10, 1);
-    return sprite;
-}}
-
-items.forEach(it => {{
-    let geo;
-    if (it.kind === 'circle') {{
-        geo = new THREE.CylinderGeometry(it.width/2, it.width/2, it.height, 32);
-    }} else {{
-        geo = new THREE.BoxGeometry(it.width, it.height, it.depth);
-    }}
-    const mat = new THREE.MeshLambertMaterial({{ color: it.color }});
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(it.x, it.height / 2, it.z);
-    mesh.rotation.y = -it.angle * Math.PI / 180;
-    scene.add(mesh);
-    meshes.push(mesh);
-
-    const label = makeLabel(it.name);
-    label.position.set(it.x, it.height + 8, it.z);
-    scene.add(label);
-}});
-
-function animate() {{
-    requestAnimationFrame(animate);
-    controls.update();
-    renderer.render(scene, camera);
-}}
-animate();
-
-window.addEventListener('resize', () => {{
-    const w = container.clientWidth;
-    camera.aspect = w / H;
-    camera.updateProjectionMatrix();
-    renderer.setSize(w, H, false);
-}});
-</script>
-</body>
-</html>
-"""
+// ---------- Group
