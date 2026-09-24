@@ -1,26 +1,23 @@
 """
-Cell Site Tower Floor Plan Maker — Full App (v6, live 2D↔3D sync)
-==================================================================
-Uses a Custom Streamlit Component (CCv2) wrapping Fabric.js.
-- Live two-way sync: every edit inside the canvas reruns Streamlit
-  and updates st.session_state.canvas_json.
-- The 3D preview always reflects the current 2D canvas — including
-  deletions, drags, rotates, and resizes.
+Cell Site Tower Floor Plan Maker — Full App (v7, flattened component)
+=====================================================================
+Uses a Custom Streamlit Component (CCv2) wrapping Fabric.js for the 2D
+editor, with live two-way sync into Python so the 3D preview updates
+whenever you add, move, rotate, resize, or delete objects.
 
 Run:
     streamlit run app.py
 
 Companion files:
-    components/fabric_editor/__init__.py       -> CCv2 wrapper
-    components/fabric_editor/frontend/index.html -> Fabric.js editor
-    equipment_library.py                        -> catalog + fabric_group_objects()
-    three_viewer.py                             -> Three.js 3D preview
+    fabric_editor.py                        -> CCv2 wrapper (top-level module)
+    fabric_editor_frontend/index.html       -> Fabric.js editor frontend
+    equipment_library.py                    -> catalog + fabric_group_objects()
+    three_viewer.py                         -> Three.js 3D preview
 """
 
 import json
 import uuid
 from datetime import datetime
-from pathlib import Path
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -34,8 +31,7 @@ from equipment_library import (
     PIXELS_PER_METER,
 )
 from three_viewer import build_3d_html
-
-from components.fabric_editor import fabric_editor
+from fabric_editor import fabric_editor
 
 
 # ==================================================================
@@ -75,7 +71,7 @@ st.markdown(
 
 
 # ==================================================================
-# Session state helpers — MUST be defined before sidebar uses them
+# Session state — defined BEFORE sidebar uses it
 # ==================================================================
 def _init_state():
     defaults = {
@@ -94,12 +90,12 @@ def _init_state():
 
 
 def _bump_canvas():
-    """Force a fresh canvas (new reset_nonce → component reloads the drawing)."""
+    """Force the CCv2 component to reload its drawing (new reset_nonce)."""
     st.session_state.canvas_key += 1
 
 
 def _apply_place_queue():
-    """Convert queued equipment into Fabric group objects and append to canvas_json."""
+    """Convert queued equipment into Fabric group objects and append them."""
     if not st.session_state.place_queue:
         return
 
@@ -120,6 +116,7 @@ def _apply_place_queue():
 
         inner = fabric_group_objects(item["key"], w, h)
 
+        # Fabric group children use center-origin. Shift each to top-left.
         shifted = []
         for sub in inner:
             sub = dict(sub)
@@ -240,7 +237,10 @@ if st.sidebar.button("➕ Add to canvas", use_container_width=True, type="primar
 st.sidebar.divider()
 
 st.sidebar.subheader("2. Editing Tools")
-st.sidebar.caption("Toolbar inside the canvas (below) handles Select / Rect / Circle / Line / Text / Delete / Undo.")
+st.sidebar.caption(
+    "Toolbar inside the canvas handles Select / Rect / Circle / Line / "
+    "Text / Delete / Undo / Redo."
+)
 stroke_width = st.sidebar.slider("Default stroke width", 1, 6, 2, key="sw")
 stroke_color = st.sidebar.color_picker("Stroke color", "#222222", key="sc")
 fill_color = st.sidebar.color_picker("Fill color", "#4A90D9", key="fc")
@@ -334,9 +334,6 @@ with left:
         key="fabric_editor_main",
     )
 
-    # The component returns the live canvas JSON on every edit
-    # (added / removed / modified). Merging it here keeps Python in sync
-    # so the 3D preview and measurements update immediately.
     _ingest_live_state(live_state)
 
     st.caption(
@@ -438,7 +435,7 @@ with right:
 
 
 # ==================================================================
-# 3D preview — always reflects the CURRENT canvas state
+# 3D preview — reflects the current 2D canvas state
 # ==================================================================
 st.divider()
 st.subheader("🌐 3D Preview")
@@ -497,7 +494,7 @@ with st.expander("ℹ️ How to use", expanded=False):
            - **Select** — drag, rotate (top handle), resize (corner handles)
            - **Rect / Circle / Line / Text** — draw annotations
            - **Delete** — remove selected objects
-           - **Undo** — remove last object
+           - **Undo / Redo** — navigate history
         3. **Rename** objects and change **3D heights** on the right panel.
         4. The **3D preview below** updates automatically — including when
            you delete, drag, or rotate objects inside the canvas.
