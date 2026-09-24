@@ -1,17 +1,20 @@
 """
-Cell Site Tower Floor Plan Maker — Full App (v5.1, order-fixed)
-================================================================
-Uses an embedded Fabric.js canvas via st.components.v1.html.
-No streamlit-drawable-canvas-fix — that component caused the
-"object appears then disappears on every rerun" bug.
+Cell Site Tower Floor Plan Maker — Full App (v6, live 2D↔3D sync)
+==================================================================
+Uses a Custom Streamlit Component (CCv2) wrapping Fabric.js.
+- Live two-way sync: every edit inside the canvas reruns Streamlit
+  and updates st.session_state.canvas_json.
+- The 3D preview always reflects the current 2D canvas — including
+  deletions, drags, rotates, and resizes.
 
 Run:
     streamlit run app.py
 
 Companion files:
-    fabric_canvas.html     -> embedded Fabric.js editor
-    equipment_library.py   -> catalog + fabric_group_objects()
-    three_viewer.py        -> Three.js 3D preview builder
+    components/fabric_editor/__init__.py       -> CCv2 wrapper
+    components/fabric_editor/frontend/index.html -> Fabric.js editor
+    equipment_library.py                        -> catalog + fabric_group_objects()
+    three_viewer.py                             -> Three.js 3D preview
 """
 
 import json
@@ -31,6 +34,8 @@ from equipment_library import (
     PIXELS_PER_METER,
 )
 from three_viewer import build_3d_html
+
+from components.fabric_editor import fabric_editor
 
 
 # ==================================================================
@@ -70,11 +75,11 @@ st.markdown(
 
 
 # ==================================================================
-# Session state
+# Session state helpers — MUST be defined before sidebar uses them
 # ==================================================================
 def _init_state():
     defaults = {
-        "canvas_json": None,
+        "canvas_json": {"version": "5.3.0", "objects": []},
         "object_names": {},
         "object_equip": {},
         "object_heights": {},
@@ -89,19 +94,12 @@ def _init_state():
 
 
 def _bump_canvas():
+    """Force a fresh canvas (new reset_nonce → component reloads the drawing)."""
     st.session_state.canvas_key += 1
 
 
-# ==================================================================
-# Core helpers — MUST be defined before the sidebar uses them
-# ==================================================================
 def _apply_place_queue():
-    """
-    Convert every queued equipment placement into a Fabric *group*
-    object and append it to st.session_state.canvas_json.
-    Groups use primitive shapes only (rect/circle/line/textbox),
-    so there is no async image loading and no blinking.
-    """
+    """Convert queued equipment into Fabric group objects and append to canvas_json."""
     if not st.session_state.place_queue:
         return
 
@@ -122,8 +120,6 @@ def _apply_place_queue():
 
         inner = fabric_group_objects(item["key"], w, h)
 
-        # Fabric group children use center-origin by default. Shift every
-        # child by -w/2, -h/2 so the group's left/top is a top-left anchor.
         shifted = []
         for sub in inner:
             sub = dict(sub)
@@ -162,27 +158,30 @@ def _apply_place_queue():
     st.session_state.place_queue = []
 
 
-def _render_fabric_html(
-    initial: dict, w: int, h: int, mode: str,
-    stroke: str, fill: str, stroke_w: int, bg: str,
-) -> str:
-    tpl = (Path(__file__).parent / "fabric_canvas.html").read_text(encoding="utf-8")
-    return (tpl
-            .replace("__INITIAL__", json.dumps(initial or {"objects": []}))
-            .replace("__MODE__", mode)
-            .replace("__STROKE__", stroke)
-            .replace("__FILL__", fill + "55" if fill.startswith("#") else fill)
-            .replace("__STROKE_W__", str(stroke_w))
-            .replace("__BG__", bg)
-            .replace("__HEIGHT__", str(h))
-            .replace("__WIDTH__", str(w)))
+def _ingest_live_state(live):
+    """Merge the CCv2 component's returned value into session state."""
+    if not live or not isinstance(live, dict):
+        return
+    if "objects" not in live:
+        return
+    st.session_state.canvas_json = live
+    for obj in live.get("objects", []):
+        oid = obj.get("id") or obj.get("name")
+        if not oid:
+            continue
+        if obj.get("name"):
+            st.session_state.object_names[oid] = obj["name"]
+        if obj.get("equipment_type"):
+            st.session_state.object_equip[oid] = obj["equipment_type"]
+        if obj.get("equip_height_3d") is not None:
+            st.session_state.object_heights[oid] = obj["equip_height_3d"]
 
 
 # ==================================================================
-# Init session state + apply any leftover queue from previous run
+# Init + apply anything pending from a previous run
 # ==================================================================
 _init_state()
-_apply_place_queue()  # safe: function is now defined above
+_apply_place_queue()
 
 
 # ==================================================================
@@ -234,20 +233,15 @@ if st.sidebar.button("➕ Add to canvas", use_container_width=True, type="primar
         "h": custom_h,
         "height_3d": custom_height,
     })
-    _apply_place_queue()   # bake into canvas_json now
-    _bump_canvas()         # fresh iframe
+    _apply_place_queue()
+    _bump_canvas()
     st.rerun()
 
 st.sidebar.divider()
 
 st.sidebar.subheader("2. Editing Tools")
-drawing_mode = st.sidebar.selectbox(
-    "Default mode",
-    ["transform", "rect", "circle", "line", "text"],
-    index=0,
-    key="mode_select",
-)
-stroke_width = st.sidebar.slider("Stroke width", 1, 6, 2, key="sw")
+st.sidebar.caption("Toolbar inside the canvas (below) handles Select / Rect / Circle / Line / Text / Delete / Undo.")
+stroke_width = st.sidebar.slider("Default stroke width", 1, 6, 2, key="sw")
 stroke_color = st.sidebar.color_picker("Stroke color", "#222222", key="sc")
 fill_color = st.sidebar.color_picker("Fill color", "#4A90D9", key="fc")
 bg_color = st.sidebar.color_picker("Background", "#ffffff", key="bgc")
@@ -324,36 +318,32 @@ if uploaded is not None:
 
 
 # ==================================================================
-# Layout: canvas + object inspector
+# Layout: canvas + inspector
 # ==================================================================
 left, right = st.columns([3, 1], gap="medium")
 
 with left:
     st.subheader("2D Floor Plan Editor")
 
-    initial_for_canvas = st.session_state.canvas_json or {"objects": []}
-
-    html = _render_fabric_html(
-        initial=initial_for_canvas,
-        w=st.session_state.canvas_w,
-        h=st.session_state.canvas_h,
-        mode=drawing_mode,
-        stroke=stroke_color,
-        fill=fill_color,
-        stroke_w=stroke_width,
-        bg=bg_color,
+    live_state = fabric_editor(
+        initial_drawing=st.session_state.canvas_json or {"objects": []},
+        reset_nonce=str(st.session_state.canvas_key),
+        width=st.session_state.canvas_w,
+        height=st.session_state.canvas_h,
+        background=bg_color,
+        key="fabric_editor_main",
     )
 
-    components.html(
-        html,
-        height=st.session_state.canvas_h + 90,
-        scrolling=False,
-    )
+    # The component returns the live canvas JSON on every edit
+    # (added / removed / modified). Merging it here keeps Python in sync
+    # so the 3D preview and measurements update immediately.
+    _ingest_live_state(live_state)
 
     st.caption(
         f"Scale: 20 px = 1 m  ·  "
         f"Canvas: {st.session_state.canvas_w}×{st.session_state.canvas_h}px  ·  "
-        f"≈ {px_to_m(st.session_state.canvas_w)} × {px_to_m(st.session_state.canvas_h)} m"
+        f"≈ {px_to_m(st.session_state.canvas_w)} × {px_to_m(st.session_state.canvas_h)} m  ·  "
+        f"Live sync ✅"
     )
 
 
@@ -430,7 +420,7 @@ with right:
 
         if len(objects) >= 2:
             st.divider()
-            st.markdown("**Distance between objects (initial positions)**")
+            st.markdown("**Distance between objects**")
             labels = [
                 f"#{i+1} — "
                 f"{st.session_state.object_names.get(o.get('id') or o.get('name'), 'obj')}"
@@ -448,7 +438,7 @@ with right:
 
 
 # ==================================================================
-# 3D preview
+# 3D preview — always reflects the CURRENT canvas state
 # ==================================================================
 st.divider()
 st.subheader("🌐 3D Preview")
@@ -462,6 +452,7 @@ for o in objects_2d:
     oid = o.get("id") or o.get("name")
     equip_key = st.session_state.object_equip.get(oid) or o.get("equipment_type")
     if not equip_key:
+        # Unknown object (e.g. user-drawn annotation) — skip silently
         continue
     enriched = dict(o)
     enriched["equipment_type"] = equip_key
@@ -489,6 +480,8 @@ if geometry_objs:
     cols = st.columns(max(1, len(by_cat)))
     for c, (cat, n) in zip(cols, sorted(by_cat.items())):
         c.metric(cat, n)
+else:
+    st.info("Add objects to the canvas to see them here in 3D.")
 
 
 # ==================================================================
@@ -500,31 +493,31 @@ with st.expander("ℹ️ How to use", expanded=False):
         ### How to use
 
         1. **Pick equipment** in the sidebar, adjust size, click **➕ Add to canvas**.
-        2. Inside the canvas toolbar:
-           - **Select** — drag, rotate (top handle), resize (corner handles).
-           - **Rect / Circle / Line / Text** — draw annotations.
-           - **Delete** — remove selected objects.
-           - **Undo / Redo** — full history.
+        2. Use the **toolbar above the canvas** to switch tools:
+           - **Select** — drag, rotate (top handle), resize (corner handles)
+           - **Rect / Circle / Line / Text** — draw annotations
+           - **Delete** — remove selected objects
+           - **Undo** — remove last object
         3. **Rename** objects and change **3D heights** on the right panel.
-        4. See the **3D preview** below.
+        4. The **3D preview below** updates automatically — including when
+           you delete, drag, or rotate objects inside the canvas.
         5. **Export / Import** projects as JSON.
 
         ### Scale
         `20 px = 1 m`. All measurements in meters.
 
-        ### Stability
-        The canvas is a self-contained Fabric.js instance embedded directly
-        in the page. All drawing, dragging, rotating, and history happen
-        inside the iframe — Streamlit reruns no longer reset it.
-        Your objects only disappear when you click **Clear**, **Reset view**,
-        or **Import**.
+        ### Live sync
+        The 2D canvas is a Custom Streamlit Component (CCv2). Every edit
+        inside it pushes the updated drawing JSON back to Python, which
+        reruns the app and refreshes the 3D preview. There is a short
+        debounce (~250ms) so dragging doesn't spam reruns.
 
-        ### Known limitation
-        Live edits made *inside* the canvas (moving, rotating, resizing) are
-        preserved visually but are **not** automatically pushed back to
-        Python. Export uses the last known Python-side snapshot. If you need
-        bidirectional sync, this app would need a Custom Streamlit Component
-        (CCv2) — a bigger architecture.
+        ### Notes
+        - The canvas only resets when you click **Add**, **Clear**,
+          **Reset view**, or **Import**.
+        - Lattice / guyed towers are visually represented (truss legs,
+          braces, guy wires) but not structurally simulated.
+        - Freeform and text objects are not extruded to 3D (no volume).
         """
     )
 
