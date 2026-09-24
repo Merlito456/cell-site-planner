@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<style>
+  html, body { margin:0; padding:0; background:#ffffff; overflow:hidden;
+               font-family: system-ui, sans-serif; }
+  #toolbar {
+    display:flex; gap:4px; padding:6px 8px;
+    background:#f4f6f9; border-bottom:1px solid #d8dee6;
+    align-items:center; font-size:12px;
+  }
+  #toolbar button {
+    padding:5px 12px; border:1px solid #c7cfda; background:#fff;
+    border-radius:4px; cursor:pointer; font-size:12px;
+    transition: all 0.1s;
+  }
+  #toolbar button:hover { background:#eef2f7; }
+  #toolbar button.active { background:#4A90D9; color:#fff; border-color:#3a78bb; }
+  #hint { color:#666; margin-left:auto; font-size:11px; }
+  #wrap { position:relative; }
+  .canvas-container { border:1px solid #e0e3e8; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/fabric@5.3.0/dist/fabric.min.js"></script>
+</head>
+<body>
+<div id="toolbar">
+  <button id="btn-select" class="active" title="Select / transform">Select</button>
+  <button id="btn-rect" title="Draw rectangle">▭ Rect</button>
+  <button id="btn-circle" title="Draw circle">○ Circle</button>
+  <button id="btn-line" title="Draw line">╱ Line</button>
+  <button id="btn-text" title="Add text">T Text</button>
+  <button id="btn-del" title="Delete selected">🗑 Delete</button>
+  <button id="btn-undo" title="Undo">↶ Undo</button>
+  <button id="btn-redo" title="Redo">↷ Redo</button>
+  <span id="hint">Drag to move · rotate from top handle · resize from corners</span>
+</div>
+<div id="wrap"><canvas id="c"></canvas></div>
+
+<script>
+(function() {
+  const canvas = new fabric.Canvas('c', {
+    width: __WIDTH__,
+    height: __HEIGHT__,
+    backgroundColor: "__BG__",
+    selection: true,
+    preserveObjectStacking: true,
+    stopContextMenu: true,
+  });
+
+  // ---------- Load initial drawing once ----------
+  const initial = __INITIAL__;
+  if (initial && initial.objects && initial.objects.length > 0) {
+    canvas.loadFromJSON(initial, function() {
+      canvas.renderAll();
+    });
+  } else {
+    canvas.renderAll();
+  }
+
+  // ---------- History (undo/redo) ----------
+  const history = [];
+  let historyIndex = -1;
+  let isRestoring = false;
+
+  function snapshot() {
+    if (isRestoring) return;
+    const json = JSON.stringify(canvas.toJSON(['id','name','equipment_type','equip_height_3d']));
+    // Drop forward history
+    history.splice(historyIndex + 1);
+    history.push(json);
+    historyIndex = history.length - 1;
+    if (history.length > 50) { history.shift(); historyIndex--; }
+  }
+
+  function restore(idx) {
+    if (idx < 0 || idx >= history.length) return;
+    isRestoring = true;
+    canvas.loadFromJSON(history[idx], function() {
+      canvas.renderAll();
+      isRestoring = false;
+    });
+    historyIndex = idx;
+  }
+
+  // Seed history after initial load
+  setTimeout(snapshot, 100);
+
+  document.getElementById('btn-undo').onclick = () => restore(historyIndex - 1);
+  document.getElementById('btn-redo').onclick = () => restore(historyIndex + 1);
+
+  // ---------- Tool modes ----------
+  let currentMode = "__MODE__";
+  function setMode(mode) {
+    currentMode = mode;
+    canvas.isDrawingMode = false;
+    canvas.selection = (mode === "transform");
+    canvas.forEachObject(o => {
+      o.selectable = (mode === "transform");
+      o.evented = (mode === "transform");
+    });
+    canvas.discardActiveObject();
+    canvas.renderAll();
+    document.querySelectorAll('#toolbar button').forEach(b => b.classList.remove('active'));
+    const id = { transform: 'btn-select', rect: 'btn-rect', circle: 'btn-circle',
+                 line: 'btn-line', text: 'btn-text' }[mode];
+    if (id) document.getElementById(id).classList.add('active');
+    canvas.defaultCursor = mode === "transform" ? "default" : "crosshair";
+  }
+  setMode(currentMode);
+
+  document.getElementById('btn-select').onclick = () => setMode('transform');
+  document.getElementById('btn-rect').onclick   = () => setMode('rect');
+  document.getElementById('btn-circle').onclick = () => setMode('circle');
+  document.getElementById('btn-line').onclick   = () => setMode('line');
+  document.getElementById('btn-text').onclick   = () => setMode('text');
+  document.getElementById('btn-del').onclick = () => {
+    canvas.getActiveObjects().forEach(o => canvas.remove(o));
+    canvas.discardActiveObject();
+    canvas.renderAll();
+    snapshot();
+  };
+
+  // ---------- Draw handlers ----------
+  let isDown = false, origX = 0, origY = 0, tempObj = null;
+
+  canvas.on('mouse:down', function(opt) {
+    if (currentMode === 'transform') return;
+    if (opt.target) return; // clicked an existing object
+    const p = canvas.getPointer(opt.e);
+    isDown = true;
+    origX = p.x; origY = p.y;
+
+    if (currentMode === 'rect') {
+      tempObj = new fabric.Rect({
+        left: origX, top: origY, width: 1, height: 1,
+        fill: "__FILL__", stroke: "__STROKE__", strokeWidth: __STROKE_W__,
+        selectable: false, evented: false,
+      });
+      canvas.add(tempObj);
+    } else if (currentMode === 'circle') {
+      tempObj = new fabric.Circle({
+        left: origX, top: origY, radius: 1,
+        fill: "__FILL__", stroke: "__STROKE__", strokeWidth: __STROKE_W__,
+        selectable: false, evented: false,
+      });
+      canvas.add(tempObj);
+    } else if (currentMode === 'line') {
+      tempObj = new fabric.Line([origX, origY, origX, origY], {
+        stroke: "__STROKE__", strokeWidth: __STROKE_W__,
+        selectable: false, evented: false,
+      });
+      canvas.add(tempObj);
+    } else if (currentMode === 'text') {
+      const t = new fabric.IText('Double-click to edit', {
+        left: p.x, top: p.y,
+        fontSize: 16, fill: "__STROKE__",
+        fontFamily: 'system-ui, sans-serif',
+      });
+      canvas.add(t);
+      canvas.setActiveObject(t);
+      t.enterEditing();
+      t.selectAll();
+      setMode('transform');
+      snapshot();
+    }
+  });
+
+  canvas.on('mouse:move', function(opt) {
+    if (!isDown || !tempObj) return;
+    const p = canvas.getPointer(opt.e);
+    if (currentMode === 'rect') {
+      tempObj.set({
+        left: Math.min(p.x, origX), top: Math.min(p.y, origY),
+        width: Math.abs(p.x - origX), height: Math.abs(p.y - origY),
+      });
+    } else if (currentMode === 'circle') {
+      const r = Math.hypot(p.x - origX, p.y - origY);
+      tempObj.set({ radius: r, left: origX - r, top: origY - r });
+    } else if (currentMode === 'line') {
+      tempObj.set({ x2: p.x, y2: p.y });
+    }
+    canvas.renderAll();
+  });
+
+  canvas.on('mouse:up', function() {
+    if (currentMode === 'transform') return;
+    if (!tempObj) { isDown = false; return; }
+    const minSize = 8;
+    if (currentMode === 'rect' &&
+        (tempObj.width < minSize || tempObj.height < minSize)) {
+      canvas.remove(tempObj);
+    } else if (currentMode === 'circle' && tempObj.radius < minSize) {
+      canvas.remove(tempObj);
+    } else {
+      // Give freshly drawn object a stable id + metadata
+      tempObj.set({
+        id: 'user_' + Math.random().toString(36).slice(2, 10),
+        name: currentMode === 'rect' ? 'Rectangle'
+            : currentMode === 'circle' ? 'Circle'
+            : currentMode === 'line' ? 'Line' : 'Annotation',
+        equipment_type: 'custom_box',
+      });
+      tempObj.set({ selectable: true, evented: true });
+    }
+    tempObj = null;
+    isDown = false;
+    canvas.renderAll();
+    snapshot();
+  });
+
+  // History on every modification
+  canvas.on('object:modified', snapshot);
+  canvas.on('object:added', function(e) {
+    if (e.target && e.target.selectable === false) return; // temp drawing obj
+    snapshot();
+  });
+
+  // ---------- Expose the canvas to the parent window ----------
+  window.fabricCanvas = canvas;
+})();
+</script>
+</body>
+</html>
