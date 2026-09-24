@@ -1,32 +1,19 @@
 """
-Cell Site Tower Floor Plan Maker — Full App (v3, fixed)
-=======================================================
-Streamlit + Fabric.js (2D editing with realistic SVG symbols)
-         + Three.js  (realistic composed 3D preview)
+Cell Site Tower Floor Plan Maker — Full App (v4, primitive-based)
+=================================================================
+Streamlit + Fabric.js (2D primitives) + Three.js (3D preview)
 
 Run:
     streamlit run app.py
 
-Dependencies (requirements.txt):
+Dependencies:
     streamlit>=1.36.0
     streamlit-drawable-canvas-fix>=0.9.4
     Pillow>=10.0.0
 
-Companion files (must exist in the same folder):
-    icons2d.py             -> 2D SVG top-view symbols (base64 data URLs)
-    equipment_library.py   -> equipment catalog + helpers
-    three_viewer.py        -> realistic Three.js 3D preview builder
-
-Key fixes in this version
--------------------------
-1. Canvas is re-keyed ONLY on explicit actions (add / clear / import /
-   reset). Sidebar widget changes do NOT reset the canvas anymore.
-2. New objects are written directly into `canvas_json` (not just a
-   temporary queue), so they persist across reruns.
-3. `crossOrigin` is set BEFORE `src` on image objects.
-4. The 3D preview is rendered OUTSIDE of tabs (tabs re-run both panes
-   every rerun, which was silently killing the canvas).
-5. A debug expander in the sidebar lets you verify icons load.
+Companion files:
+    equipment_library.py   -> catalog + fabric_group_objects()
+    three_viewer.py        -> Three.js 3D preview builder
 """
 
 import json
@@ -40,7 +27,7 @@ import streamlit.components.v1 as components
 from equipment_library import (
     EQUIPMENT_LIBRARY,
     get_equipment,
-    get_icon_for,
+    fabric_group_objects,
     px_to_m,
     px2_to_m2,
     PIXELS_PER_METER,
@@ -92,13 +79,13 @@ st.markdown(
 def _init_state():
     defaults = {
         "canvas_json": None,
-        "object_names": {},        # object_id -> display name
-        "object_equip": {},        # object_id -> equipment key
-        "object_heights": {},      # object_id -> 3D height override (m)
+        "object_names": {},
+        "object_equip": {},
+        "object_heights": {},
         "canvas_w": 1000,
         "canvas_h": 700,
-        "place_queue": [],         # pending equipment placements
-        "canvas_key": 0,           # bump to force canvas reset
+        "place_queue": [],
+        "canvas_key": 0,
         "project_name": "Site-001",
     }
     for k, v in defaults.items():
@@ -108,16 +95,14 @@ _init_state()
 
 
 def _bump_canvas():
-    """Force the Fabric canvas to be rebuilt with a fresh key."""
     st.session_state.canvas_key += 1
 
 
 # ==================================================================
-# Sidebar — equipment picker & canvas settings
+# Sidebar — equipment picker
 # ==================================================================
 st.sidebar.title("🗼 Cell Site Planner")
 
-# ---- Build category index -----------------------------------------
 categories: dict[str, list[str]] = {}
 for k, v in EQUIPMENT_LIBRARY.items():
     categories.setdefault(v["category"], []).append(k)
@@ -134,9 +119,7 @@ picked_label = st.sidebar.selectbox(
 picked_key = equip_keys[equip_labels.index(picked_label)]
 picked_equip = EQUIPMENT_LIBRARY[picked_key]
 
-st.sidebar.caption(
-    f"**{picked_equip['label']}** — {picked_equip['category']}"
-)
+st.sidebar.caption(f"**{picked_equip['label']}** — {picked_equip['category']}")
 
 custom_w = st.sidebar.number_input(
     "Footprint width (px)",
@@ -164,20 +147,17 @@ if st.sidebar.button("➕ Add to canvas", use_container_width=True, type="primar
         "h": custom_h,
         "height_3d": custom_height,
     })
-    # CRITICAL: bump the canvas key so a fresh canvas is built with the
-    # new object baked into initial_drawing.
     _bump_canvas()
     st.rerun()
 
 st.sidebar.divider()
 
-# ---- Editing tools (these do NOT bump the canvas) ----------------
+# ---- Editing tools (do NOT bump the canvas) ----------------------
 st.sidebar.subheader("2. Editing Tools")
 drawing_mode = st.sidebar.selectbox(
     "Mode",
     ["transform", "rect", "circle", "line", "polygon", "freeform", "text"],
     index=0,
-    help="Use 'transform' to drag/rotate/scale placed objects.",
     key="mode_select",
 )
 stroke_width = st.sidebar.slider("Stroke width", 1, 6, 2, key="sw")
@@ -190,16 +170,12 @@ st.sidebar.divider()
 # ---- Canvas settings ---------------------------------------------
 st.sidebar.subheader("3. Canvas")
 st.session_state.canvas_w = st.sidebar.number_input(
-    "Canvas width (px)",
-    min_value=400, max_value=3000,
-    value=st.session_state.canvas_w, step=50,
-    key="csw",
+    "Canvas width (px)", min_value=400, max_value=3000,
+    value=st.session_state.canvas_w, step=50, key="csw",
 )
 st.session_state.canvas_h = st.sidebar.number_input(
-    "Canvas height (px)",
-    min_value=400, max_value=3000,
-    value=st.session_state.canvas_h, step=50,
-    key="csh",
+    "Canvas height (px)", min_value=400, max_value=3000,
+    value=st.session_state.canvas_h, step=50, key="csh",
 )
 
 st.sidebar.divider()
@@ -224,7 +200,6 @@ with col_reset:
         _bump_canvas()
         st.rerun()
 
-# Export
 export_payload = {
     "project": st.session_state.project_name,
     "saved_at": datetime.utcnow().isoformat() + "Z",
@@ -243,7 +218,6 @@ st.sidebar.download_button(
     use_container_width=True,
 )
 
-# Import
 uploaded = st.sidebar.file_uploader(
     "📂 Import project (JSON)", type=["json"], key="import_file"
 )
@@ -263,25 +237,16 @@ if uploaded is not None:
     except Exception as e:
         st.sidebar.error(f"Load failed: {e}")
 
-# ---- Debug expander ----------------------------------------------
-with st.sidebar.expander("🔍 Debug: icon preview"):
-    st.caption("Verifies that SVG icons are generated correctly.")
-    for k in ["tower_lattice", "cabinet_outdoor", "generator", "fuel_tank"]:
-        url = get_icon_for(k)
-        st.caption(f"{k} · len={len(url)} · has#={'#' in url}")
-        st.image(url, width=70)
-
 
 # ==================================================================
-# Build `initial_drawing` (persisted canvas + pending placements)
+# Build `initial_drawing`
 # ==================================================================
 def _build_initial_drawing() -> dict:
     """
     Merge the last-known canvas JSON with any newly queued equipment.
-    New items are written directly into the returned dict AND into
-    st.session_state.canvas_json so they persist across reruns.
+    New items are Fabric *groups* of primitives — no images, no async
+    loading, no blinking.
     """
-    # If there is nothing new to add, just hand back the stored canvas.
     if not st.session_state.place_queue and st.session_state.canvas_json:
         return st.session_state.canvas_json
 
@@ -290,7 +255,6 @@ def _build_initial_drawing() -> dict:
         "objects": [],
         "background": "#ffffff",
     }
-    # Deep copy so we don't mutate the session dict while iterating
     base = json.loads(json.dumps(base))
     objects = base.setdefault("objects", [])
 
@@ -301,31 +265,51 @@ def _build_initial_drawing() -> dict:
         st.session_state.object_names.setdefault(oid, equip["label"])
         st.session_state.object_heights.setdefault(oid, item["height_3d"])
 
-        # Stagger new items so they don't stack perfectly.
+        w, h = item["w"], item["h"]
         offset = (len(objects) % 8) * 25
-        icon_url = get_icon_for(item["key"])
+        left, top = 80 + offset, 80 + offset
 
-        obj = {
+        # Build the inner primitives relative to (0,0), then wrap in a group.
+        inner = fabric_group_objects(item["key"], w, h)
+
+        # Fabric group coordinates are relative to the group's center by
+        # default; we want top-left semantics, so shift each child by -w/2, -h/2
+        # and set originX/originY on the group to "left"/"top".
+        shifted_inner = []
+        for sub in inner:
+            sub = dict(sub)
+            sub["left"] = sub.get("left", 0) - w / 2
+            sub["top"] = sub.get("top", 0) - h / 2
+            # lines use x1/y1/x2/y2, not left/top
+            if sub["type"] == "line":
+                sub["x1"] = sub.get("x1", 0) - w / 2
+                sub["y1"] = sub.get("y1", 0) - h / 2
+                sub["x2"] = sub.get("x2", 0) - w / 2
+                sub["y2"] = sub.get("y2", 0) - h / 2
+                sub.pop("left", None)
+                sub.pop("top", None)
+            shifted_inner.append(sub)
+
+        group_obj = {
+            "type": "group",
             "id": oid,
-            "type": "image",
-            # crossOrigin MUST be before src for Fabric.js to load data URLs
-            "crossOrigin": "anonymous",
-            "src": icon_url,
-            "left": 80 + offset,
-            "top": 80 + offset,
-            "width": item["w"],
-            "height": item["h"],
+            "left": left,
+            "top": top,
+            "width": w,
+            "height": h,
             "scaleX": 1,
             "scaleY": 1,
             "angle": 0,
-            "opacity": 1,
+            "originX": "left",
+            "originY": "top",
+            "objects": shifted_inner,
+            # --- custom props preserved by Fabric.js ---
             "name": st.session_state.object_names[oid],
             "equipment_type": item["key"],
             "equip_height_3d": item["height_3d"],
         }
-        objects.append(obj)
+        objects.append(group_obj)
 
-    # Persist back so the next rerun keeps everything.
     st.session_state.canvas_json = base
     st.session_state.place_queue = []
     return base
@@ -334,9 +318,6 @@ def _build_initial_drawing() -> dict:
 initial_drawing = _build_initial_drawing()
 
 
-# ==================================================================
-# Helper — sync object metadata from canvas back into session
-# ==================================================================
 def _sync_from_canvas(canvas_json: dict) -> None:
     if not canvas_json:
         return
@@ -351,7 +332,7 @@ def _sync_from_canvas(canvas_json: dict) -> None:
 
 
 # ==================================================================
-# Layout: 2D canvas + right-hand inspector
+# Layout
 # ==================================================================
 left, right = st.columns([3, 1], gap="medium")
 
@@ -384,9 +365,6 @@ with left:
     )
 
 
-# ==================================================================
-# Right panel — object inspector, measurements, distances
-# ==================================================================
 with right:
     st.subheader("Objects & Measurements")
 
@@ -396,7 +374,6 @@ with right:
         st.info("No objects yet. Add equipment from the sidebar.")
     else:
         total_area_m2 = 0.0
-
         st.markdown(
             f"""
             <div class="metric-strip">
@@ -436,7 +413,6 @@ with right:
                     unsafe_allow_html=True,
                 )
 
-                # rename (does not re-key the canvas — just updates metadata)
                 new_name = st.text_input(
                     "Rename", value=label, key=f"rename_{oid}"
                 )
@@ -446,7 +422,6 @@ with right:
                         if (o.get("id") or o.get("name")) == oid:
                             o["name"] = new_name
 
-                # 3D height override
                 default_h = st.session_state.object_heights.get(
                     oid, equip.get("height_3d", 1.0)
                 )
@@ -465,7 +440,6 @@ with right:
         st.divider()
         st.metric("Total footprint", f"{round(total_area_m2, 2)} m²")
 
-        # ---- Distance tool ----
         if len(objects) >= 2:
             st.divider()
             st.markdown("**Distance between objects**")
@@ -486,7 +460,7 @@ with right:
 
 
 # ==================================================================
-# 3D Preview (rendered OUTSIDE tabs to avoid canvas reset)
+# 3D preview
 # ==================================================================
 st.divider()
 st.subheader("🌐 3D Preview")
@@ -495,7 +469,7 @@ objects_2d = (st.session_state.canvas_json or {}).get("objects", []) or []
 
 geometry_objs = []
 for o in objects_2d:
-    if o.get("type") not in ("rect", "circle", "triangle", "image"):
+    if o.get("type") not in ("rect", "circle", "triangle", "image", "group"):
         continue
     oid = o.get("id") or o.get("name")
     equip_key = st.session_state.object_equip.get(oid) or o.get("equipment_type")
@@ -518,7 +492,6 @@ html = build_3d_html(
 )
 components.html(html, height=580, scrolling=False)
 
-# Quick stats under the 3D view
 if geometry_objs:
     by_cat: dict[str, int] = {}
     for o in geometry_objs:
@@ -531,58 +504,36 @@ if geometry_objs:
 
 
 # ==================================================================
-# Help (in an expander, not a tab)
+# Help
 # ==================================================================
 with st.expander("ℹ️ How to use", expanded=False):
     st.markdown(
         """
         ### How to use
 
-        1. **Pick equipment** from the sidebar (categorized: Tower, Cabinet,
-           Rack, Cable Ladder, Foundation, Power, Antenna, Custom).
-        2. Adjust the **2D footprint** and **3D height** if needed.
-        3. Click **➕ Add to canvas** — the canvas refreshes and the object
-           appears with a real top-view symbol.
-        4. Switch the canvas **Mode** to **transform** and use the toolbar to
-           **drag, rotate, resize**. Use the trash icon to delete.
-        5. Use **rect / circle / line / polygon / text** modes to add
-           annotations directly on the plan.
-        6. **Rename objects** and set per-object **3D heights** in the right
-           panel — names appear on the 3D labels.
-        7. Use the **Distance tool** to measure between any two objects.
-        8. The **3D preview** below updates automatically.
-        9. **Export / Import** the project as JSON.
+        1. **Pick equipment** from the sidebar.
+        2. Adjust **footprint** and **3D height**, then click **➕ Add to canvas**.
+        3. Switch canvas **Mode** to **transform** and drag / rotate / resize.
+        4. Use **rect / circle / line / polygon / text** for annotations.
+        5. **Rename** objects and set per-object **3D heights** on the right.
+        6. Use the **Distance tool** to measure between objects.
+        7. See the **3D preview** below.
+        8. **Export / Import** the project as JSON.
 
         ### Scale
-        `20 px = 1 m` on the 2D canvas. All measurements shown in meters.
-        Adjust `PIXELS_PER_METER` in `equipment_library.py` if you need a
-        different scale.
+        `20 px = 1 m`. All measurements in meters.
 
-        ### 3D mouse controls
-        - **Left drag** – orbit
-        - **Right drag** – pan
-        - **Scroll** – zoom
+        ### 3D controls
+        Left-drag = orbit · Right-drag = pan · Scroll = zoom
 
-        ### Notes & limitations
-        - The 3D preview is **view-only** — all editing is done on the 2D
-          canvas. This is by design (matches most browser floor planners).
-        - Lattice / guyed towers are **visually represented** (truss legs,
-          braces, guy wires) but not structurally simulated.
-        - Freeform and text objects are not extruded (no volume).
-        - **Canvas reset behavior:** the canvas only resets when you click
-          Add / Clear / Reset / Import. Changing sliders, colors, or drawing
-          mode will not blank your work.
-
-        ### Deploying to Streamlit Cloud
-        1. Push the project folder to GitHub.
-        2. Go to https://share.streamlit.io → **New app**.
-        3. Select the repo, branch, and `app.py`.
-        4. Click **Deploy**.
+        ### Why the canvas doesn't blink anymore
+        Equipment is rendered as **Fabric.js primitive groups** (rect / circle /
+        line / text). No `image` objects are used, so there is no async SVG
+        loading that could cause a re-render mid-interaction.
         """
     )
 
 st.caption(
     f"Cell Site Floor Plan Maker · {st.session_state.project_name} · "
-    f"{len((st.session_state.canvas_json or {}).get('objects', []) or [])} object(s) · "
-    f"scale 20 px = 1 m"
+    f"{len((st.session_state.canvas_json or {}).get('objects', []) or [])} object(s)"
 )
