@@ -1,801 +1,596 @@
 """
-Realistic Three.js 3D preview.
-Each equipment type is built from composed geometry (not just a box).
+Cell Site Tower Floor Plan Maker — Full App
+============================================
+Streamlit + Fabric.js (2D editing with realistic SVG symbols)
+         + Three.js  (realistic composed 3D preview)
+
+Run:
+    streamlit run app.py
+
+Dependencies (requirements.txt):
+    streamlit>=1.36.0
+    streamlit-drawable-canvas-fix>=0.9.4
+    Pillow>=10.0.0
+
+Companion files (must exist in the same folder):
+    icons2d.py             -> 2D SVG top-view symbols
+    equipment_library.py   -> equipment catalog + helpers
+    three_viewer.py        -> realistic Three.js 3D preview builder
 """
 
 import json
-from equipment_library import EQUIPMENT_LIBRARY
+import uuid
+import urllib.parse
+from datetime import datetime
+
+import streamlit as st
+from streamlit_drawable_canvas import st_canvas
+import streamlit.components.v1 as components
+
+from equipment_library import (
+    EQUIPMENT_LIBRARY,
+    get_equipment,
+    get_icon_for,
+    px_to_m,
+    px2_to_m2,
+    PIXELS_PER_METER,
+)
+from three_viewer import build_3d_html
 
 
-def build_3d_html(objects_2d: list, canvas_w: int, canvas_h: int) -> str:
-    scene_data = []
-    for obj in objects_2d or []:
-        equip_key = obj.get("equipment_type", "custom_box")
-        equip = EQUIPMENT_LIBRARY.get(equip_key, EQUIPMENT_LIBRARY["custom_box"])
+# ==================================================================
+# Page config
+# ==================================================================
+st.set_page_config(
+    page_title="Cell Site Floor Plan Maker",
+    page_icon="🗼",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-        w = (obj.get("width") or (obj.get("radius", 0) * 2)) * obj.get("scaleX", 1)
-        h = (obj.get("height") or (obj.get("radius", 0) * 2)) * obj.get("scaleY", 1)
-        left = obj.get("left", 0)
-        top = obj.get("top", 0)
-
-        cx = left + w / 2 - canvas_w / 2
-        cz = top + h / 2 - canvas_h / 2
-
-        scene_data.append({
-            "kind": obj.get("type", "rect"),
-            "name": obj.get("name") or equip["label"],
-            "equipment_type": equip_key,
-            "detail": equip.get("detail", "box"),
-            "width": w,
-            "depth": h,
-            "height": equip["height_3d"],
-            "x": cx,
-            "z": cz,
-            "angle": obj.get("angle", 0),
-            "color": equip["color_3d"],
-        })
-
-    data_json = json.dumps(scene_data)
-
-    return _HTML_TEMPLATE.replace("__DATA__", data_json)
-
-
-_HTML_TEMPLATE = r"""
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8" />
-<style>
-    html, body { margin:0; padding:0; overflow:hidden; background:#0f1116; }
-    #c { width:100%; height:560px; display:block; }
-    .hint {
-        position:absolute; top:10px; left:10px; color:#eaeaea;
-        font-family: system-ui, sans-serif; font-size:12px;
-        background:rgba(0,0,0,0.55); padding:6px 10px; border-radius:6px;
-        pointer-events:none; z-index:10;
+st.markdown(
+    """
+    <style>
+    .block-container { padding-top: 1rem; padding-bottom: 1rem; }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .eq-card {
+        background:#f8f9fb; border:1px solid #e0e3e8; border-radius:8px;
+        padding:6px 10px; margin-bottom:6px; font-size:13px; line-height:1.5;
     }
-    .loading {
-        position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
-        color:#aaa; font-family: system-ui, sans-serif; font-size:14px;
+    .eq-card b { color:#1f2937; }
+    .metric-strip {
+        display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;
     }
-</style>
-<script type="importmap">
-{
-  "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-  }
-}
-</script>
-</head>
-<body>
-<div class="hint">Left-drag rotate &nbsp;|&nbsp; Right-drag pan &nbsp;|&nbsp; Scroll zoom</div>
-<canvas id="c"></canvas>
-<script type="module">
-import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-
-// ---------- Renderer ----------
-const canvasEl = document.getElementById('c');
-const W = canvasEl.clientWidth;
-const H = 560;
-
-const renderer = new THREE.WebGLRenderer({
-    canvas: canvasEl, antialias: true, alpha: false
-});
-renderer.setSize(W, H, false);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-
-// ---------- Scene ----------
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0f1116);
-scene.fog = new THREE.Fog(0x0f1116, 900, 2400);
-
-const pmrem = new THREE.PMREMGenerator(renderer);
-scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-
-// ---------- Camera ----------
-const camera = new THREE.PerspectiveCamera(50, W/H, 0.5, 8000);
-camera.position.set(420, 320, 520);
-
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.08;
-controls.maxPolarAngle = Math.PI / 2.02;
-controls.target.set(0, 15, 0);
-
-// ---------- Lights ----------
-const hemi = new THREE.HemisphereLight(0xbfd3ff, 0x1a1a1f, 0.6);
-scene.add(hemi);
-
-const sun = new THREE.DirectionalLight(0xffffff, 2.4);
-sun.position.set(300, 500, 260);
-sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.camera.near = 10;
-sun.shadow.camera.far = 1500;
-sun.shadow.camera.left = -700;
-sun.shadow.camera.right = 700;
-sun.shadow.camera.top = 700;
-sun.shadow.camera.bottom = -700;
-sun.shadow.bias = -0.0004;
-scene.add(sun);
-
-const fill = new THREE.DirectionalLight(0xaaccff, 0.4);
-fill.position.set(-400, 200, -300);
-scene.add(fill);
-
-// ---------- Ground ----------
-const groundGeo = new THREE.PlaneGeometry(4000, 4000);
-const groundMat = new THREE.MeshStandardMaterial({
-    color: 0x2a2d34, roughness: 0.95, metalness: 0.0
-});
-const ground = new THREE.Mesh(groundGeo, groundMat);
-ground.rotation.x = -Math.PI / 2;
-ground.position.y = -0.02;
-ground.receiveShadow = true;
-scene.add(ground);
-
-// subtle grid
-const grid = new THREE.GridHelper(2000, 100, 0x4a4d55, 0x2e3138);
-grid.material.opacity = 0.35;
-grid.material.transparent = true;
-grid.position.y = 0.01;
-scene.add(grid);
-
-// ---------- Materials cache ----------
-const matCache = {};
-function metal(color, rough = 0.55, met = 0.85) {
-    const k = `m_${color}_${rough}_${met}`;
-    if (!matCache[k]) {
-        matCache[k] = new THREE.MeshStandardMaterial({
-            color, roughness: rough, metalness: met
-        });
+    .metric-chip {
+        background:#eef2f7; border:1px solid #d6dde7; border-radius:8px;
+        padding:6px 10px; font-size:12px; color:#1f2937;
     }
-    return matCache[k];
-}
-function matte(color, rough = 0.9) {
-    const k = `f_${color}_${rough}`;
-    if (!matCache[k]) {
-        matCache[k] = new THREE.MeshStandardMaterial({
-            color, roughness: rough, metalness: 0.05
-        });
+    .metric-chip b { font-size:14px; }
+    .cat-badge {
+        display:inline-block; padding:2px 8px; border-radius:10px;
+        background:#e8eef7; color:#2a4a76; font-size:11px;
+        margin-bottom:4px;
     }
-    return matCache[k];
-}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-// ---------- Group wrapper ----------
-function makeGroup(obj) {
-    const g = new THREE.Group();
-    g.userData = obj;
-    return g;
-}
 
-// ---------- Builders ----------
-function addMesh(parent, geo, mat, x, y, z, rx = 0, ry = 0, rz = 0) {
-    const m = new THREE.Mesh(geo, mat);
-    m.position.set(x, y, z);
-    m.rotation.set(rx, ry, rz);
-    m.castShadow = true;
-    m.receiveShadow = true;
-    parent.add(m);
-    return m;
-}
-
-// --- Tower: lattice ---
-function buildLattice(w, d, h, color) {
-    const g = new THREE.Group();
-    const steelMat = metal(color, 0.45, 0.9);
-    const legT = Math.max(w * 0.035, 1.2);
-    const legH = h;
-    const legGeo = new THREE.BoxGeometry(legT, legH, legT);
-
-    const xInset = w * 0.34;
-    const zInset = d * 0.34;
-    const legPositions = [
-        [-xInset, -zInset], [ xInset, -zInset],
-        [-xInset,  zInset], [ xInset,  zInset],
-    ];
-    for (const [x, z] of legPositions) {
-        addMesh(g, legGeo, steelMat, x, legH / 2, z);
-    }
-
-    // horizontal braces
-    const braceThickness = legT * 0.6;
-    const braceGeoX = new THREE.BoxGeometry(w * 0.68, braceThickness, braceThickness);
-    const braceGeoZ = new THREE.BoxGeometry(braceThickness, braceThickness, d * 0.68);
-    const levels = 8;
-    for (let i = 1; i < levels; i++) {
-        const y = (legH / levels) * i;
-        addMesh(g, braceGeoX, steelMat, 0, y, -zInset);
-        addMesh(g, braceGeoX, steelMat, 0, y,  zInset);
-        addMesh(g, braceGeoZ, steelMat, -xInset, y, 0);
-        addMesh(g, braceGeoZ, steelMat,  xInset, y, 0);
-    }
-
-    // X-bracing on one face (visual only)
-    const diagLen = Math.hypot(w * 0.68, legH / levels);
-    const diagGeo = new THREE.BoxGeometry(diagLen, braceThickness * 0.7, braceThickness * 0.7);
-    const angle = Math.atan2(legH / levels, w * 0.68);
-    for (let i = 0; i < levels - 1; i++) {
-        const y0 = (legH / levels) * i + (legH / levels) / 2;
-        const m1 = addMesh(g, diagGeo, steelMat, 0, y0, -zInset);
-        m1.rotation.z =  angle;
-        const m2 = addMesh(g, diagGeo, steelMat, 0, y0, -zInset);
-        m2.rotation.z = -angle;
-    }
-    return g;
-}
-
-// --- Tower: monopole (tapered cylinder) ---
-function buildMonopole(w, h, color) {
-    const g = new THREE.Group();
-    const r = w * 0.28;
-    const geo = new THREE.CylinderGeometry(r * 0.55, r, h, 24, 1, false);
-    addMesh(g, geo, metal(color, 0.4, 0.9), 0, h / 2, 0);
-
-    // base plate
-    addMesh(
-        g,
-        new THREE.BoxGeometry(w * 0.9, 0.4, w * 0.9),
-        metal(0x333333, 0.6, 0.9),
-        0, 0.2, 0
-    );
-
-    // small flange rings
-    for (let i = 1; i <= 4; i++) {
-        const y = (h / 5) * i;
-        const rr = r * (1 - (y / h) * 0.45);
-        addMesh(
-            g,
-            new THREE.CylinderGeometry(rr + 0.3, rr + 0.3, 0.3, 20),
-            metal(0x222222, 0.5, 0.9),
-            0, y, 0
-        );
-    }
-    return g;
-}
-
-// --- Tower: guyed ---
-function buildGuyed(w, h, color) {
-    const g = new THREE.Group();
-    const r = w * 0.22;
-    const tower = new THREE.Mesh(
-        new THREE.CylinderGeometry(r * 0.4, r, h, 16),
-        metal(color, 0.45, 0.9)
-    );
-    tower.position.y = h / 2;
-    tower.castShadow = true;
-    g.add(tower);
-
-    // guy wires
-    const wireMat = new THREE.LineBasicMaterial({ color: 0x888888 });
-    const radius = w * 2.4;
-    for (let a = 0; a < 6; a++) {
-        const ang = (a / 6) * Math.PI * 2;
-        const pts = [
-            new THREE.Vector3(0, h * 0.98, 0),
-            new THREE.Vector3(Math.cos(ang) * radius, 0, Math.sin(ang) * radius)
-        ];
-        g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), wireMat));
-    }
-    return g;
-}
-
-// --- Rooftop pole ---
-function buildPole(w, h, color) {
-    const g = new THREE.Group();
-    const geo = new THREE.CylinderGeometry(w * 0.12, w * 0.15, h, 16);
-    addMesh(g, geo, metal(color, 0.4, 0.85), 0, h / 2, 0);
-    addMesh(
-        g,
-        new THREE.BoxGeometry(w * 0.6, 0.15, w * 0.6),
-        metal(0x333333, 0.6, 0.9),
-        0, 0.07, 0
-    );
-    return g;
-}
-
-// --- Cabinet (with doors, vents, plinth) ---
-function buildCabinet(w, d, h, color) {
-    const g = new THREE.Group();
-    const bodyMat = metal(color, 0.55, 0.55);
-    const trimMat = metal(0x3a3a3a, 0.6, 0.7);
-    const body = new THREE.Mesh(
-        new THREE.BoxGeometry(w, h, d), bodyMat
-    );
-    body.position.y = h / 2 + 0.15;
-    body.castShadow = true;
-    body.receiveShadow = true;
-    g.add(body);
-
-    // plinth
-    addMesh(g, new THREE.BoxGeometry(w + 2, 0.3, d + 2), trimMat, 0, 0.15, 0);
-
-    // door split line
-    addMesh(
-        g,
-        new THREE.BoxGeometry(0.3, h * 0.9, 0.3),
-        trimMat,
-        0, h / 2 + 0.15, d / 2 + 0.02
-    );
-    // hinges
-    for (const side of [-1, 1]) {
-        for (const t of [0.3, 0.7]) {
-            addMesh(
-                g,
-                new THREE.BoxGeometry(0.6, 1.2, 0.4),
-                trimMat,
-                side * (w / 2 - 1.5), 0.15 + h * t, d / 2 + 0.05
-            );
-        }
-    }
-    // vent slots
-    for (let i = 0; i < 6; i++) {
-        addMesh(
-            g,
-            new THREE.BoxGeometry(w * 0.55, 0.35, 0.2),
-            trimMat,
-            0, h * 0.15 + i * 0.9, d / 2 + 0.06
-        );
-    }
-    // roof lip
-    addMesh(
-        g,
-        new THREE.BoxGeometry(w + 1.2, 0.35, d + 1.2),
-        trimMat,
-        0, 0.15 + h + 0.15, 0
-    );
-    return g;
-}
-
-// --- Rack ---
-function buildRack(w, d, h, color) {
-    const g = new THREE.Group();
-    const frameMat = metal(color, 0.5, 0.6);
-    const accentMat = metal(0x1a1a1a, 0.55, 0.5);
-
-    addMesh(g, new THREE.BoxGeometry(w, h, d), frameMat, 0, h / 2, 0);
-
-    // front panel with equipment units
-    const front = new THREE.Mesh(
-        new THREE.BoxGeometry(w * 0.92, h * 0.94, 0.3),
-        accentMat
-    );
-    front.position.set(0, h / 2, d / 2 + 0.16);
-    front.castShadow = true;
-    g.add(front);
-
-    // rack units
-    const units = Math.floor(h / 1.2);
-    for (let i = 0; i < units; i++) {
-        const y = 0.6 + i * 1.15;
-        if (y + 0.6 > h - 0.1) break;
-        addMesh(
-            g,
-            new THREE.BoxGeometry(w * 0.85, 0.75, 0.15),
-            metal(0x3a3a3a, 0.6, 0.5),
-            0, y, d / 2 + 0.33
-        );
-        // status LEDs
-        addMesh(
-            g,
-            new THREE.BoxGeometry(0.35, 0.2, 0.1),
-            new THREE.MeshStandardMaterial({
-                color: 0x4ade80, emissive: 0x22aa55, emissiveIntensity: 1.4
-            }),
-            w * 0.32, y, d / 2 + 0.42
-        );
-    }
-    return g;
-}
-
-// --- Cable ladder ---
-function buildLadder(w, d, h, color) {
-    const g = new THREE.Group();
-    const railMat = metal(color, 0.5, 0.85);
-    const railT = Math.max(d * 0.18, 0.6);
-    const rail1 = new THREE.Mesh(new THREE.BoxGeometry(w, railT, railT), railMat);
-    rail1.position.set(0, h + railT / 2, -d / 2 + railT / 2);
-    rail1.castShadow = true;
-    g.add(rail1);
-
-    const rail2 = rail1.clone();
-    rail2.position.z = d / 2 - railT / 2;
-    g.add(rail2);
-
-    // rungs
-    const step = Math.max(w / 14, 6);
-    for (let x = -w / 2 + step; x <= w / 2 - step; x += step) {
-        addMesh(
-            g,
-            new THREE.BoxGeometry(railT * 0.6, railT * 0.6, d - railT * 2),
-            railMat,
-            x, h + railT / 2, 0
-        );
-    }
-    return g;
-}
-
-// --- Basepad ---
-function buildBasepad(w, d, h, color) {
-    const g = new THREE.Group();
-    const slab = new THREE.Mesh(
-        new THREE.BoxGeometry(w, h, d),
-        matte(color, 0.95)
-    );
-    slab.position.y = h / 2;
-    slab.receiveShadow = true;
-    slab.castShadow = true;
-    g.add(slab);
-    return g;
-}
-
-// --- Fence (perimeter) ---
-function buildFence(w, d, h, color) {
-    const g = new THREE.Group();
-    const postMat = metal(color, 0.6, 0.7);
-    const meshMat = new THREE.MeshStandardMaterial({
-        color: 0xcccccc, roughness: 0.8, metalness: 0.4,
-        transparent: true, opacity: 0.35, side: THREE.DoubleSide
-    });
-
-    const postGeo = new THREE.BoxGeometry(0.5, h, 0.5);
-    const postEvery = 20;
-    const nX = Math.floor(w / postEvery);
-    const nZ = Math.floor(d / postEvery);
-
-    // front & back rows
-    for (let i = 0; i <= nX; i++) {
-        const x = -w / 2 + (i / nX) * w;
-        for (const z of [-d / 2, d / 2]) {
-            addMesh(g, postGeo, postMat, x, h / 2, z);
-        }
-    }
-    // left & right
-    for (let i = 0; i <= nZ; i++) {
-        const z = -d / 2 + (i / nZ) * d;
-        for (const x of [-w / 2, w / 2]) {
-            addMesh(g, postGeo, postMat, x, h / 2, z);
-        }
-    }
-    // panels
-    const panelH = h * 0.95;
-    const front = new THREE.Mesh(new THREE.PlaneGeometry(w, panelH), meshMat);
-    front.position.set(0, panelH / 2, -d / 2);
-    g.add(front);
-    const back = front.clone();
-    back.position.z = d / 2;
-    g.add(back);
-    const left = new THREE.Mesh(new THREE.PlaneGeometry(d, panelH), meshMat);
-    left.rotation.y = Math.PI / 2;
-    left.position.set(-w / 2, panelH / 2, 0);
-    g.add(left);
-    const right = left.clone();
-    right.position.x = w / 2;
-    g.add(right);
-    return g;
-}
-
-// --- Generator (enclosure + exhaust + control panel) ---
-function buildGenerator(w, d, h, color) {
-    const g = new THREE.Group();
-    const bodyMat = metal(color, 0.55, 0.35);
-    const darkMat = metal(0x1f1f1f, 0.6, 0.5);
-
-    // base skid
-    addMesh(g, new THREE.BoxGeometry(w * 1.02, 0.2, d * 1.02), darkMat, 0, 0.1, 0);
-
-    // main enclosure
-    const enclosure = new THREE.Mesh(
-        new THREE.BoxGeometry(w, h * 0.85, d), bodyMat
-    );
-    enclosure.position.y = 0.2 + (h * 0.85) / 2;
-    enclosure.castShadow = true;
-    enclosure.receiveShadow = true;
-    g.add(enclosure);
-
-    // curved roof
-    const roof = new THREE.Mesh(
-        new THREE.CylinderGeometry(d * 0.5, d * 0.5, w, 16, 1, false, 0, Math.PI),
-        bodyMat
-    );
-    roof.rotation.z = Math.PI / 2;
-    roof.position.set(0, 0.2 + h * 0.85, 0);
-    roof.scale.y = 0.6;
-    roof.castShadow = true;
-    g.add(roof);
-
-    // vents (louvers)
-    for (let i = 0; i < 5; i++) {
-        addMesh(
-            g,
-            new THREE.BoxGeometry(0.3, h * 0.6, d * 0.8),
-            darkMat,
-            w / 2 - 0.6 - i * 1.6, 0.2 + h * 0.45, 0
-        );
-    }
-
-    // exhaust pipe
-    const exhaust = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.5, 0.5, h * 0.9, 12),
-        darkMat
-    );
-    exhaust.position.set(-w * 0.3, 0.2 + h * 0.85 + h * 0.35, -d * 0.25);
-    exhaust.castShadow = true;
-    g.add(exhaust);
-
-    // control panel
-    addMesh(
-        g,
-        new THREE.BoxGeometry(w * 0.22, h * 0.35, 0.2),
-        darkMat,
-        w * 0.35, 0.2 + h * 0.5, d / 2 + 0.12
-    );
-    return g;
-}
-
-// --- Fuel tank (horizontal cylinder on saddles) ---
-function buildFuelTank(w, d, h, color) {
-    const g = new THREE.Group();
-    const r = Math.min(w, d) / 2;
-    const length = Math.max(w, d);
-    const tankMat = metal(color, 0.55, 0.7);
-
-    // rotate so cylinder lies along the longer axis
-    const along = w >= d ? "x" : "z";
-    const body = new THREE.Mesh(
-        new THREE.CylinderGeometry(r, r, length, 32),
-        tankMat
-    );
-    if (along === "x") body.rotation.z = Math.PI / 2;
-    else body.rotation.x = Math.PI / 2;
-    body.position.y = h / 2;
-    body.castShadow = true;
-    body.receiveShadow = true;
-    g.add(body);
-
-    // end caps (spheres)
-    for (const s of [-1, 1]) {
-        const cap = new THREE.Mesh(new THREE.SphereGeometry(r, 24, 16), tankMat);
-        cap.position.set(along === "x" ? s * length / 2 : 0, h / 2,
-                         along === "z" ? s * length / 2 : 0);
-        cap.scale.setScalar(1);
-        cap.castShadow = true;
-        g.add(cap);
-    }
-
-    // saddle supports
-    const saddleMat = metal(0x3a3a3a, 0.7, 0.4);
-    for (const x of [-length * 0.3, length * 0.3]) {
-        addMesh(
-            g,
-            new THREE.BoxGeometry(2, h * 0.4, r * 1.6),
-            saddleMat,
-            along === "x" ? x : 0, h * 0.2,
-            along === "z" ? x : 0
-        );
-    }
-
-    // top vent / fill cap
-    addMesh(
-        g,
-        new THREE.CylinderGeometry(0.8, 0.8, 1.2, 12),
-        metal(0x222222, 0.6, 0.6),
-        0, h + 0.4, 0
-    );
-    return g;
-}
-
-// --- ATS Panel ---
-function buildATS(w, d, h, color) {
-    const g = new THREE.Group();
-    addMesh(g, new THREE.BoxGeometry(w, h, d), metal(color, 0.55, 0.4), 0, h / 2, 0);
-    // front indicator lights
-    const colors = [0x4ade80, 0xfbbf24, 0xef4444];
-    for (let i = 0; i < 3; i++) {
-        addMesh(
-            g,
-            new THREE.CylinderGeometry(0.3, 0.3, 0.15, 12),
-            new THREE.MeshStandardMaterial({
-                color: colors[i], emissive: colors[i], emissiveIntensity: 1.4
-            }),
-            -w * 0.25 + i * w * 0.25, h * 0.6, d / 2 + 0.05,
-            Math.PI / 2, 0, 0
-        );
-    }
-    addMesh(
-        g,
-        new THREE.BoxGeometry(w * 0.7, h * 0.15, 0.2),
-        metal(0x111111, 0.5, 0.4),
-        0, h * 0.25, d / 2 + 0.1
-    );
-    return g;
-}
-
-// --- Antenna panel ---
-function buildAntenna(w, d, h, color) {
-    const g = new THREE.Group();
-    const panelMat = new THREE.MeshStandardMaterial({
-        color, roughness: 0.5, metalness: 0.2
-    });
-    const backMat = metal(0x666666, 0.5, 0.7);
-
-    // radome (white panel) — height is 3D "height", thickness from footprint
-    const thickness = Math.max(w, d);
-    const panel = new THREE.Mesh(
-        new THREE.BoxGeometry(thickness, h, thickness * 0.6),
-        panelMat
-    );
-    panel.position.y = h / 2;
-    panel.castShadow = true;
-    g.add(panel);
-
-    // mounting bracket
-    addMesh(
-        g,
-        new THREE.BoxGeometry(thickness * 1.2, h * 0.15, thickness * 0.9),
-        backMat,
-        0, h * 0.5, -thickness * 0.4
-    );
-    addMesh(
-        g,
-        new THREE.BoxGeometry(thickness * 1.2, h * 0.15, thickness * 0.9),
-        backMat,
-        0, h * 0.85, -thickness * 0.4
-    );
-    return g;
-}
-
-// --- RRU ---
-function buildRRU(w, d, h, color) {
-    const g = new THREE.Group();
-    const bodyMat = metal(color, 0.5, 0.55);
-    const ribMat = metal(0x2a2a2a, 0.6, 0.4);
-
-    const t = Math.max(w, d);
-    const body = new THREE.Mesh(
-        new THREE.BoxGeometry(t, h, t * 0.55), bodyMat
-    );
-    body.position.y = h / 2;
-    body.castShadow = true;
-    g.add(body);
-
-    // heat fins
-    const fins = 7;
-    for (let i = 0; i < fins; i++) {
-        addMesh(
-            g,
-            new THREE.BoxGeometry(t * 0.9, 0.06, 0.15),
-            ribMat,
-            0, h * 0.15 + i * (h * 0.7 / fins), t * 0.28
-        );
-    }
-    // connectors
-    addMesh(
-        g,
-        new THREE.CylinderGeometry(0.15, 0.15, 0.2, 8),
-        metal(0x111111, 0.5, 0.6),
-        -t * 0.25, h * 0.1, t * 0.3, Math.PI / 2, 0, 0
-    );
-    return g;
-}
-
-// --- Generic box (custom) ---
-function buildBox(w, d, h, color) {
-    const g = new THREE.Group();
-    const m = new THREE.Mesh(
-        new THREE.BoxGeometry(w, h, d),
-        matte(color, 0.85)
-    );
-    m.position.y = h / 2;
-    m.castShadow = true;
-    m.receiveShadow = true;
-    g.add(m);
-    return g;
-}
-
-// ---------- Dispatch ----------
-function buildObject(it) {
-    const {detail, width, depth, height, color} = it;
-    switch (detail) {
-        case "lattice":    return buildLattice(width, depth, height, color);
-        case "monopole":   return buildMonopole(width, height, color);
-        case "guyed":      return buildGuyed(width, height, color);
-        case "pole":       return buildPole(width, height, color);
-        case "cabinet":    return buildCabinet(width, depth, height, color);
-        case "rack":       return buildRack(width, depth, height, color);
-        case "ladder":     return buildLadder(width, depth, height, color);
-        case "basepad":    return buildBasepad(width, depth, height, color);
-        case "fence":      return buildFence(width, depth, height, color);
-        case "generator":  return buildGenerator(width, depth, height, color);
-        case "fuel_tank":  return buildFuelTank(width, depth, height, color);
-        case "ats":        return buildATS(width, depth, height, color);
-        case "antenna":    return buildAntenna(width, depth, height, color);
-        case "rru":        return buildRRU(width, depth, height, color);
-        default:           return buildBox(width, depth, height, color);
-    }
-}
-
-// ---------- Labels ----------
-function makeLabel(text) {
-    const c = document.createElement('canvas');
-    c.width = 512; c.height = 128;
-    const ctx = c.getContext('2d');
-    ctx.fillStyle = 'rgba(15,17,22,0.85)';
-    ctx.fillRect(0,0,512,128);
-    ctx.strokeStyle = '#5a5f68';
-    ctx.lineWidth = 3;
-    ctx.strokeRect(2,2,508,124);
-    ctx.fillStyle = '#f0f0f0';
-    ctx.font = 'bold 42px system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText((text || '').substring(0, 24), 256, 64);
-    const tex = new THREE.CanvasTexture(c);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    const mat = new THREE.SpriteMaterial({
-        map: tex, depthTest: false, transparent: true
-    });
-    const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(60, 15, 1);
-    return sprite;
-}
-
-// ---------- Build scene ----------
-const items = __DATA__;
-
-// Fit camera to bounding box
-if (items.length > 0) {
-    let maxDim = 200;
-    items.forEach(it => {
-        maxDim = Math.max(maxDim,
-            Math.abs(it.x) + it.width,
-            Math.abs(it.z) + it.depth,
-            it.height * 1.2);
-    });
-    const dist = maxDim * 1.6;
-    camera.position.set(dist * 0.9, dist * 0.7, dist * 1.0);
-    controls.target.set(0, Math.min(20, maxDim * 0.15), 0);
-    controls.update();
-}
-
-items.forEach(it => {
-    const group = buildObject(it);
-    group.position.set(it.x, 0, it.z);
-    group.rotation.y = -it.angle * Math.PI / 180;
-    scene.add(group);
-
-    // label above object
-    const labelY = Math.max(it.height + 6, 8);
-    const label = makeLabel(it.name);
-    label.position.set(it.x, labelY, it.z);
-    scene.add(label);
-});
-
-// ---------- Resize ----------
-function onResize() {
-    const w = canvasEl.clientWidth;
-    camera.aspect = w / H;
-    camera.updateProjectionMatrix();
-    renderer.setSize(w, H, false);
-}
-window.addEventListener('resize', onResize);
-
-// ---------- Loop ----------
-function animate() {
-    requestAnimationFrame(animate);
-    controls.update();
-    renderer.render(scene, camera);
-}
-animate();
-</script>
-</body>
-</html>
+# ==================================================================
+# Blueprint grid background (SVG, embedded as a data URL)
+# ==================================================================
+_BLUEPRINT_SVG = """
+<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'>
+  <defs>
+    <pattern id='g' width='20' height='20' patternUnits='userSpaceOnUse'>
+      <path d='M 20 0 L 0 0 0 20' fill='none' stroke='#eef2f7' stroke-width='1'/>
+    </pattern>
+    <pattern id='G' width='100' height='100' patternUnits='userSpaceOnUse'>
+      <rect width='100' height='100' fill='url(#g)'/>
+      <path d='M 100 0 L 0 0 0 100' fill='none' stroke='#dbe3ee' stroke-width='1.5'/>
+    </pattern>
+  </defs>
+  <rect width='100%' height='100%' fill='url(#G)'/>
+</svg>
 """
+BLUEPRINT_BG_URL = "data:image/svg+xml;utf8," + urllib.parse.quote(_BLUEPRINT_SVG)
+
+
+# ==================================================================
+# Session state
+# ==================================================================
+def _init_state():
+    defaults = {
+        "canvas_json": None,
+        "object_names": {},        # object_id -> display name
+        "object_equip": {},        # object_id -> equipment key
+        "object_heights": {},      # object_id -> 3D height override (m)
+        "canvas_w": 1000,
+        "canvas_h": 700,
+        "place_queue": [],         # pending equipment placements
+        "canvas_key": 0,           # bump to force canvas reset
+        "project_name": "Site-001",
+    }
+    for k, v in defaults.items():
+        st.session_state.setdefault(k, v)
+
+_init_state()
+
+
+# ==================================================================
+# Sidebar — equipment picker & canvas settings
+# ==================================================================
+st.sidebar.title("🗼 Cell Site Planner")
+
+# ---- Build category index -----------------------------------------
+categories: dict[str, list[str]] = {}
+for k, v in EQUIPMENT_LIBRARY.items():
+    categories.setdefault(v["category"], []).append(k)
+
+st.sidebar.subheader("1. Add Equipment")
+category = st.sidebar.selectbox(
+    "Category", sorted(categories.keys()), key="sel_category"
+)
+equip_keys = categories[category]
+equip_labels = [EQUIPMENT_LIBRARY[k]["label"] for k in equip_keys]
+picked_label = st.sidebar.selectbox(
+    "Equipment", equip_labels, key="sel_equipment"
+)
+picked_key = equip_keys[equip_labels.index(picked_label)]
+picked_equip = EQUIPMENT_LIBRARY[picked_key]
+
+st.sidebar.caption(
+    f"**{picked_equip['label']}** — {picked_equip['category']}"
+)
+
+custom_w = st.sidebar.number_input(
+    "Footprint width (px)",
+    min_value=10, max_value=800,
+    value=int(picked_equip["w"]), step=5,
+    key=f"cw_{picked_key}",
+)
+custom_h = st.sidebar.number_input(
+    "Footprint depth (px)",
+    min_value=10, max_value=800,
+    value=int(picked_equip["h"]), step=5,
+    key=f"ch_{picked_key}",
+)
+custom_height = st.sidebar.number_input(
+    "3D height (m)",
+    min_value=0.1, max_value=300.0,
+    value=float(picked_equip["height_3d"]), step=0.1,
+    key=f"ch3d_{picked_key}",
+)
+
+if st.sidebar.button("➕ Add to canvas", use_container_width=True, type="primary"):
+    st.session_state.place_queue.append({
+        "key": picked_key,
+        "w": custom_w,
+        "h": custom_h,
+        "height_3d": custom_height,
+    })
+    st.rerun()
+
+st.sidebar.divider()
+
+# ---- Editing tools ------------------------------------------------
+st.sidebar.subheader("2. Editing Tools")
+drawing_mode = st.sidebar.selectbox(
+    "Mode",
+    ["transform", "rect", "circle", "line", "polygon", "freeform", "text"],
+    index=0,
+    help="Use 'transform' to drag/rotate/scale placed objects.",
+    key="mode_select",
+)
+stroke_width = st.sidebar.slider("Stroke width", 1, 6, 2, key="sw")
+stroke_color = st.sidebar.color_picker("Stroke color", "#222222", key="sc")
+fill_color = st.sidebar.color_picker("Fill color", "#4A90D9", key="fc")
+bg_color = st.sidebar.color_picker("Background", "#ffffff", key="bgc")
+
+st.sidebar.divider()
+
+# ---- Canvas settings ----------------------------------------------
+st.sidebar.subheader("3. Canvas")
+st.session_state.canvas_w = st.sidebar.number_input(
+    "Canvas width (px)",
+    min_value=400, max_value=3000,
+    value=st.session_state.canvas_w, step=50,
+    key="csw",
+)
+st.session_state.canvas_h = st.sidebar.number_input(
+    "Canvas height (px)",
+    min_value=400, max_value=3000,
+    value=st.session_state.canvas_h, step=50,
+    key="csh",
+)
+
+st.sidebar.divider()
+
+# ---- Project ------------------------------------------------------
+st.sidebar.subheader("4. Project")
+st.session_state.project_name = st.sidebar.text_input(
+    "Project name", value=st.session_state.project_name, key="pn"
+)
+
+col_clear, col_reset = st.sidebar.columns(2)
+with col_clear:
+    if st.button("🧹 Clear", use_container_width=True):
+        st.session_state.canvas_json = None
+        st.session_state.object_names = {}
+        st.session_state.object_equip = {}
+        st.session_state.object_heights = {}
+        st.session_state.canvas_key += 1
+        st.rerun()
+with col_reset:
+    if st.button("🔄 Reset view", use_container_width=True):
+        st.session_state.canvas_key += 1
+        st.rerun()
+
+# Export
+export_payload = {
+    "project": st.session_state.project_name,
+    "saved_at": datetime.utcnow().isoformat() + "Z",
+    "canvas_json": st.session_state.canvas_json,
+    "object_names": st.session_state.object_names,
+    "object_equip": st.session_state.object_equip,
+    "object_heights": st.session_state.object_heights,
+    "canvas_w": st.session_state.canvas_w,
+    "canvas_h": st.session_state.canvas_h,
+}
+st.sidebar.download_button(
+    "💾 Export project (JSON)",
+    data=json.dumps(export_payload, indent=2),
+    file_name=f"{st.session_state.project_name}_floorplan.json",
+    mime="application/json",
+    use_container_width=True,
+)
+
+# Import
+uploaded = st.sidebar.file_uploader(
+    "📂 Import project (JSON)", type=["json"], key="import_file"
+)
+if uploaded is not None:
+    try:
+        data = json.load(uploaded)
+        st.session_state.canvas_json = data.get("canvas_json")
+        st.session_state.object_names = data.get("object_names", {})
+        st.session_state.object_equip = data.get("object_equip", {})
+        st.session_state.object_heights = data.get("object_heights", {})
+        st.session_state.canvas_w = data.get("canvas_w", 1000)
+        st.session_state.canvas_h = data.get("canvas_h", 700)
+        st.session_state.project_name = data.get("project", "Site-001")
+        st.session_state.canvas_key += 1
+        st.sidebar.success("Project loaded.")
+    except Exception as e:
+        st.sidebar.error(f"Load failed: {e}")
+
+
+# ==================================================================
+# Build `initial_drawing` (persisted canvas + pending placements)
+# ==================================================================
+def _build_initial_drawing() -> dict:
+    """
+    Merge the last-known canvas JSON with any newly queued equipment.
+    New items are inserted as Fabric.js `image` objects loading the
+    SVG icon for their equipment type.
+    """
+    base = st.session_state.canvas_json or {
+        "version": "5.3.0",
+        "objects": [],
+        "background": "#ffffff",
+    }
+    # deep copy to avoid mutating the session object
+    base = json.loads(json.dumps(base))
+    objects = base.setdefault("objects", [])
+
+    for item in st.session_state.place_queue:
+        equip = EQUIPMENT_LIBRARY[item["key"]]
+        oid = str(uuid.uuid4())
+        st.session_state.object_equip[oid] = item["key"]
+        st.session_state.object_names.setdefault(oid, equip["label"])
+        st.session_state.object_heights.setdefault(oid, item["height_3d"])
+
+        # stagger new items so they don't stack perfectly on top of each other
+        offset = (len(objects) % 8) * 25
+
+        icon_url = get_icon_for(item["key"])
+
+        obj = {
+            "id": oid,
+            "type": "image",
+            "src": icon_url,
+            "left": 80 + offset,
+            "top": 80 + offset,
+            "width": item["w"],
+            "height": item["h"],
+            "scaleX": 1,
+            "scaleY": 1,
+            "angle": 0,
+            "opacity": 1,
+            "crossOrigin": "anonymous",
+            # --- custom props preserved by Fabric.js ---
+            "name": st.session_state.object_names[oid],
+            "equipment_type": item["key"],
+            "equip_height_3d": item["height_3d"],
+        }
+        objects.append(obj)
+
+    st.session_state.place_queue = []
+    return base
+
+
+initial_drawing = _build_initial_drawing()
+
+
+# ==================================================================
+# Helper — sync object metadata from canvas back into session
+# ==================================================================
+def _sync_from_canvas(canvas_json: dict) -> None:
+    if not canvas_json:
+        return
+    for obj in canvas_json.get("objects", []):
+        oid = obj.get("id") or obj.get("name")
+        if not oid:
+            continue
+        if obj.get("name"):
+            st.session_state.object_names[oid] = obj["name"]
+        if obj.get("equipment_type"):
+            st.session_state.object_equip[oid] = obj["equipment_type"]
+
+
+# ==================================================================
+# Layout: 2D canvas + right-hand inspector
+# ==================================================================
+left, right = st.columns([3, 1], gap="medium")
+
+with left:
+    st.subheader("2D Floor Plan Editor")
+
+    canvas_result = st_canvas(
+        fill_color=fill_color + "55" if fill_color.startswith("#") else fill_color,
+        stroke_width=stroke_width,
+        stroke_color=stroke_color,
+        background_color=bg_color,
+        background_image=None,
+        update_streamlit=True,
+        height=st.session_state.canvas_h,
+        width=st.session_state.canvas_w,
+        drawing_mode=drawing_mode,
+        initial_drawing=initial_drawing,
+        display_toolbar=True,
+        key=f"canvas_{st.session_state.canvas_key}",
+    )
+
+    if canvas_result.json_data is not None:
+        st.session_state.canvas_json = canvas_result.json_data
+        _sync_from_canvas(canvas_result.json_data)
+
+    st.caption(
+        f"Scale: 20 px = 1 m  ·  "
+        f"Canvas: {st.session_state.canvas_w}×{st.session_state.canvas_h}px  ·  "
+        f"≈ {px_to_m(st.session_state.canvas_w)} × {px_to_m(st.session_state.canvas_h)} m"
+    )
+
+
+# ==================================================================
+# Right panel — object inspector, measurements, distances
+# ==================================================================
+with right:
+    st.subheader("Objects & Measurements")
+
+    objects = (st.session_state.canvas_json or {}).get("objects", []) or []
+
+    if not objects:
+        st.info("No objects yet. Add equipment from the sidebar.")
+    else:
+        total_area_m2 = 0.0
+
+        # summary chips
+        st.markdown(
+            f"""
+            <div class="metric-strip">
+              <div class="metric-chip"><b>{len(objects)}</b><br>objects</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        for i, obj in enumerate(objects):
+            oid = obj.get("id") or obj.get("name") or f"obj_{i}"
+            equip_key = (
+                st.session_state.object_equip.get(oid)
+                or obj.get("equipment_type")
+                or "custom_box"
+            )
+            equip = EQUIPMENT_LIBRARY.get(equip_key, EQUIPMENT_LIBRARY["custom_box"])
+            label = st.session_state.object_names.get(oid, equip["label"])
+
+            w = (obj.get("width") or (obj.get("radius", 0) * 2) or 40) * obj.get("scaleX", 1)
+            h = (obj.get("height") or (obj.get("radius", 0) * 2) or 40) * obj.get("scaleY", 1)
+            area_m2 = px2_to_m2(w, h)
+            total_area_m2 += area_m2
+
+            with st.expander(f"#{i+1} — {label}", expanded=False):
+                st.markdown(
+                    f"""
+                    <div class="eq-card">
+                    <span class="cat-badge">{equip.get('category','—')}</span><br>
+                    <b>Type:</b> {equip.get('label', obj.get('type','?'))}<br>
+                    <b>Size:</b> {px_to_m(w)} × {px_to_m(h)} m<br>
+                    <b>Area:</b> {area_m2} m²<br>
+                    <b>Rotation:</b> {round(obj.get('angle', 0), 1)}°<br>
+                    <b>Position:</b> ({int(obj.get('left',0))}, {int(obj.get('top',0))}) px
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                # rename
+                new_name = st.text_input(
+                    "Rename", value=label, key=f"rename_{oid}"
+                )
+                if new_name != label:
+                    st.session_state.object_names[oid] = new_name
+                    for o in st.session_state.canvas_json.get("objects", []):
+                        if (o.get("id") or o.get("name")) == oid:
+                            o["name"] = new_name
+
+                # 3D height override
+                default_h = st.session_state.object_heights.get(
+                    oid, equip.get("height_3d", 1.0)
+                )
+                new_h = st.number_input(
+                    "3D height (m)",
+                    min_value=0.1, max_value=300.0,
+                    value=float(default_h), step=0.1,
+                    key=f"h3d_{oid}",
+                )
+                if new_h != default_h:
+                    st.session_state.object_heights[oid] = new_h
+                    for o in st.session_state.canvas_json.get("objects", []):
+                        if (o.get("id") or o.get("name")) == oid:
+                            o["equip_height_3d"] = new_h
+
+        st.divider()
+        st.metric("Total footprint", f"{round(total_area_m2, 2)} m²")
+
+        # ---- Distance tool ----
+        if len(objects) >= 2:
+            st.divider()
+            st.markdown("**Distance between objects**")
+            labels = [f"#{i+1} — {st.session_state.object_names.get(o.get('id') or o.get('name'), 'obj')}"
+                      for i, o in enumerate(objects)]
+            a = st.selectbox("From", labels, index=0, key="dist_a")
+            b = st.selectbox("To", labels, index=min(1, len(labels)-1), key="dist_b")
+            ia = labels.index(a)
+            ib = labels.index(b)
+            oa, ob = objects[ia], objects[ib]
+            dx = oa.get("left", 0) - ob.get("left", 0)
+            dy = oa.get("top", 0) - ob.get("top", 0)
+            dist_px = (dx * dx + dy * dy) ** 0.5
+            st.success(f"{px_to_m(dist_px)} m apart")
+
+
+# ==================================================================
+# 3D Preview + Help tabs
+# ==================================================================
+st.divider()
+tab_3d, tab_help = st.tabs(["🌐 3D Preview", "ℹ️ Help"])
+
+with tab_3d:
+    objects_2d = (st.session_state.canvas_json or {}).get("objects", []) or []
+
+    # only extrude geometric / image objects that carry an equipment type
+    geometry_objs = []
+    for o in objects_2d:
+        if o.get("type") not in ("rect", "circle", "triangle", "image"):
+            continue
+        oid = o.get("id") or o.get("name")
+        equip_key = (
+            st.session_state.object_equip.get(oid)
+            or o.get("equipment_type")
+        )
+        if not equip_key:
+            continue
+
+        # apply user overrides before handing off to Three.js
+        enriched = dict(o)
+        enriched["equipment_type"] = equip_key
+        enriched["name"] = st.session_state.object_names.get(
+            oid, EQUIPMENT_LIBRARY[equip_key]["label"]
+        )
+
+        # height override (fall back to equipment default handled by viewer)
+        h_override = st.session_state.object_heights.get(oid)
+        if h_override is not None:
+            equip_copy = dict(EQUIPMENT_LIBRARY[equip_key])
+            equip_copy["height_3d"] = h_override
+            # three_viewer reads from EQUIPMENT_LIBRARY by key,
+            # so instead we stash the override on the object:
+            enriched["equip_height_3d"] = h_override
+
+        geometry_objs.append(enriched)
+
+    html = build_3d_html(
+        geometry_objs,
+        canvas_w=st.session_state.canvas_w,
+        canvas_h=st.session_state.canvas_h,
+    )
+    components.html(html, height=580, scrolling=False)
+
+    # quick stats under the 3D view
+    if geometry_objs:
+        by_cat: dict[str, int] = {}
+        for o in geometry_objs:
+            eq = EQUIPMENT_LIBRARY.get(o["equipment_type"], {})
+            cat = eq.get("category", "Other")
+            by_cat[cat] = by_cat.get(cat, 0) + 1
+        cols = st.columns(len(by_cat))
+        for c, (cat, n) in zip(cols, sorted(by_cat.items())):
+            c.metric(cat, n)
+
+with tab_help:
+    st.markdown(
+        """
+        ### How to use
+
+        1. **Pick equipment** from the sidebar (categorized: Tower, Cabinet,
+           Rack, Cable Ladder, Foundation, Power, Antenna, Custom).
+        2. Adjust the **2D footprint** and **3D height** if needed.
+        3. Click **➕ Add to canvas** — the object appears on the plan with a
+           real top-view symbol.
+        4. Switch the canvas **Mode** to **transform** and use the toolbar to
+           **drag, rotate, resize**. Use the trash icon to delete.
+        5. Use **rect / circle / line / polygon / text** modes to add
+           annotations directly on the plan.
+        6. **Rename objects** and set per-object **3D heights** in the right
+           panel — names appear on the 3D labels.
+        7. Use the **Distance tool** to measure between any two objects.
+        8. Open the **3D Preview** tab to see the site as realistic extruded
+           geometry with lighting, shadows, and environment reflections.
+        9. **Export / Import** the project as JSON.
+
+        ### Scale
+        `20 px = 1 m` on the 2D canvas. All measurements shown in meters.
+        Adjust `PIXELS_PER_METER` in `equipment_library.py` if you need a
+        different scale.
+
+        ### Mouse controls (3D)
+        - **Left drag** – orbit
+        - **Right drag** – pan
+        - **Scroll** – zoom
+
+        ### 2D canvas toolbar
+        - **Select / transform** – move & manipulate
+        - **Draw** – rectangles, circles, lines
+        - **Text** – annotate
+        - **Undo / Redo / Delete** – history controls
+
+        ### Notes & limitations
+        - The 3D preview is **view-only** — all editing is done on the 2D
+          canvas. This is by design (matches most browser floor planners).
+        - Lattice / guyed towers are **visually represented** (truss legs,
+          braces, guy wires) but not structurally simulated.
+        - Cable ladders extrude as a thin metal rail with rungs; route them
+          by placing multiple segments.
+        - Freeform and text objects are not extruded (no volume).
+
+        ### Deploying to Streamlit Cloud
+        1. Push the project folder to GitHub.
+        2. Go to https://share.streamlit.io → **New app**.
+        3. Select the repo, branch, and `app.py`.
+        4. Click **Deploy**.
+
+        > **Note:** GitHub Pages (github.io) cannot run Streamlit — it only
+        > serves static files. Streamlit needs a Python server. Use GitHub
+        > for source control and Streamlit Cloud (or any container host) for
+        > the running app.
+        """
+    )
+
+st.caption(
+    f"Cell Site Floor Plan Maker · {st.session_state.project_name} · "
+    f"{len((st.session_state.canvas_json or {}).get('objects', []) or [])} object(s) · "
+    f"scale 20 px = 1 m"
+)
