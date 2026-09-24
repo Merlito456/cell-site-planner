@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Fabric Editor</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; background: transparent; overflow: hidden;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  #toolbar {
+    display: flex; gap: 4px; padding: 6px 8px;
+    background: #f4f6f9; border: 1px solid #d8dee6; border-radius: 6px;
+    align-items: center; font-size: 12px; margin-bottom: 6px;
+    flex-wrap: wrap;
+  }
+  #toolbar button {
+    padding: 5px 12px; border: 1px solid #c7cfda; background: #fff;
+    border-radius: 4px; cursor: pointer; font-size: 12px;
+    transition: background 0.1s;
+  }
+  #toolbar button:hover { background: #eef2f7; }
+  #toolbar button.active {
+    background: #4A90D9; color: #fff; border-color: #3a78bb;
+  }
+  #toolbar .sep {
+    width: 1px; height: 20px; background: #d8dee6; margin: 0 4px;
+  }
+  #hint { color: #666; margin-left: auto; font-size: 11px; }
+  #wrap { position: relative; }
+  .canvas-container { border: 1px solid #e0e3e8; }
+  #loading {
+    display: flex; align-items: center; justify-content: center;
+    height: 100%; color: #888; font-size: 13px;
+  }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/fabric@5.3.0/dist/fabric.min.js"></script>
+</head>
+<body>
+
+<div id="toolbar">
+  <button id="btn-select" class="active" title="Select / transform">Select</button>
+  <button id="btn-rect" title="Draw rectangle">▭ Rect</button>
+  <button id="btn-circle" title="Draw circle">○ Circle</button>
+  <button id="btn-line" title="Draw line">╱ Line</button>
+  <button id="btn-text" title="Add text">T Text</button>
+  <div class="sep"></div>
+  <button id="btn-del" title="Delete selected">🗑 Delete</button>
+  <button id="btn-undo" title="Undo">↶</button>
+  <button id="btn-redo" title="Redo">↷</button>
+  <span id="hint">Drag to move · rotate from top handle · resize from corners</span>
+</div>
+
+<div id="wrap"><canvas id="c"></canvas></div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ============================================================
+  // Streamlit CCv2 bridge
+  // ============================================================
+  function postToStreamlit(type, data) {
+    window.parent.postMessage(
+      Object.assign({ isStreamlitMessage: true, type: type }, data || {}),
+      "*"
+    );
+  }
+  function setComponentReady() {
+    postToStreamlit("streamlit:componentReady", { apiVersion: 1 });
+  }
+  function setFrameHeight(h) {
+    postToStreamlit("streamlit:setFrameHeight", { height: h });
+  }
+  function setComponentValue(v) {
+    postToStreamlit("streamlit:setComponentValue", {
+      value: v,
+      dataType: "json"
+    });
+  }
+
+  // ============================================================
+  // Canvas state
+  // ============================================================
+  let canvas = null;
+  let currentMode = "transform";
+  let lastResetNonce = null;
+  let suppressSync = true;
+  let isReady = false;
+
+  // history for undo/redo
+  const history = [];
+  let historyIndex = -1;
+  let isRestoring = false;
+
+  // ============================================================
+  // Init
+  // ============================================================
+  function initCanvas(args) {
+    const {
+      width = 1000,
+      height = 700,
+      background = "#ffffff",
+      initial_drawing = { objects: [] },
+      reset_nonce = "0"
+    } = args || {};
+
+    if (!canvas) {
+      canvas = new fabric.Canvas("c", {
+        width: width,
+        height: height,
+        backgroundColor: background,
+        selection: true,
+        preserveObjectStacking: true,
+        stopContextMenu: true,
+      });
+      wireToolbar();
+      wireCanvasEvents();
+      wireStreamlitListener();
+    } else {
+      canvas.setDimensions({ width: width, height: height });
+      canvas.setBackgroundColor(background, function () {
+        canvas.renderAll();
+      });
+    }
+
+    setFrameHeight(height + 80);
+
+    // Only reload the drawing when reset_nonce changes.
+    if (reset_nonce !== lastResetNonce) {
+      lastResetNonce = reset_nonce;
+      suppressSync = true;
+      const dr = initial_drawing || { objects: [] };
+      canvas.loadFromJSON(dr, function () {
+        canvas.renderAll();
+        // seed history with the freshly loaded state
+        history.length = 0;
+        historyIndex = -1;
+        snapshot();
+        suppressSync = false;
+        isReady = true;
+        setComponentReady();
+      });
+    } else {
+      isReady = true;
+      setComponentReady();
+    }
+  }
+
+  // ============================================================
+  // Push live state to Streamlit (debounced)
+  // ============================================================
+  let pushTimer = null;
+  function pushState() {
+    if (suppressSync || !canvas) return;
+    if (pushTimer) clearTimeout(pushTimer);
+    pushTimer = setTimeout(function () {
+      try {
+        const json = canvas.toJSON([
+          "id", "name", "equipment_type", "equip_height_3d"
+        ]);
+        setComponentValue(json);
+      } catch (e) {
+        console.warn("pushState failed", e);
+      }
+    }, 250);
+  }
+
+  // ============================================================
+  // History (undo / redo)
+  // ============================================================
+  function snapshot() {
+    if (isRestoring || !canvas) return;
+    try {
+      const json = JSON.stringify(canvas.toJSON([
+        "id", "name", "equipment_type", "equip_height_3d"
+      ]));
+      history.splice(historyIndex + 1);
+      history.push(json);
+      historyIndex = history.length - 1;
+      if (history.length > 60) {
+        history.shift();
+        historyIndex--;
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  function restore(idx) {
+    if (idx < 0 || idx >= history.length || !canvas) return;
+    isRestoring = true;
+    canvas.loadFromJSON(history[idx], function () {
+      canvas.renderAll();
+      isRestoring = false;
+      pushState();
+    });
+    historyIndex = idx;
+  }
+
+  // ============================================================
+  // Toolbar / modes
+  // ============================================================
+  function setMode(mode) {
+    currentMode = mode;
+    if (!canvas) return;
+    canvas.isDrawingMode = false;
+    canvas.selection = (mode === "transform");
+    canvas.forEachObject(function (o) {
+      o.selectable = (mode === "transform");
+      o.evented = (mode === "transform");
+    });
+    canvas.discardActiveObject();
+    canvas.renderAll();
+
+    document.querySelectorAll("#toolbar button").forEach(function (b) {
+      b.classList.remove("active");
+    });
+    const map = {
+      transform: "btn-select",
+      rect: "btn-rect",
+      circle: "btn-circle",
+      line: "btn-line",
+      text: "btn-text"
+    };
+    const id = map[mode];
+    if (id) document.getElementById(id).classList.add("active");
+
+    canvas.defaultCursor = (mode === "transform") ? "default" : "crosshair";
+  }
+
+  function wireToolbar() {
+    document.getElementById("btn-select").onclick = function () { setMode("transform"); };
+    document.getElementById("btn-rect").onclick   = function () { setMode("rect"); };
+    document.getElementById("btn-circle").onclick = function () { setMode("circle"); };
+    document.getElementById("btn-line").onclick   = function () { setMode("line"); };
+    document.getElementById("btn-text").onclick   = function () { setMode("text"); };
+
+    document.getElementById("btn-del").onclick = function () {
+      if (!canvas) return;
+      canvas.getActiveObjects().forEach(function (o) { canvas.remove(o); });
+      canvas.discardActiveObject();
+      canvas.renderAll();
+      snapshot();
+      pushState();
+    };
+
+    document.getElementById("btn-undo").onclick = function () {
+      restore(historyIndex - 1);
+    };
+    document.getElementById("btn-redo").onclick = function () {
+      restore(historyIndex + 1);
+    };
+
+    setMode("transform");
+  }
+
+  // ============================================================
+  // Drawing handlers
+  // ============================================================
+  let isDown = false, origX = 0, origY = 0, tempObj = null;
+
+  function wireCanvasEvents() {
+    canvas.on("mouse:down", function (opt) {
+      if (currentMode === "transform") return;
+      if (opt.target) return;
+      const p = canvas.getPointer(opt.e);
+      isDown = true; origX = p.x; origY = p.y;
+
+      const common = { selectable: false, evented: false };
+
+      if (currentMode === "rect") {
+        tempObj = new fabric.Rect({
+          left: origX, top: origY, width: 1, height: 1,
+          fill: "#4A90D955", stroke: "#222222", strokeWidth: 2,
+          ...common
+        });
+        canvas.add(tempObj);
+      } else if (currentMode === "circle") {
+        tempObj = new fabric.Circle({
+          left: origX, top: origY, radius: 1,
+          fill: "#4A90D955", stroke: "#222222", strokeWidth: 2,
+          ...common
+        });
+        canvas.add(tempObj);
+      } else if (currentMode === "line") {
+        tempObj = new fabric.Line([origX, origY, origX, origY], {
+          stroke: "#222222", strokeWidth: 2,
+          ...common
+        });
+        canvas.add(tempObj);
+      } else if (currentMode === "text") {
+        const t = new fabric.IText("Double-click to edit", {
+          left: p.x, top: p.y, fontSize: 16, fill: "#222222",
+          fontFamily: "system-ui, sans-serif"
+        });
+        canvas.add(t);
+        canvas.setActiveObject(t);
+        t.enterEditing();
+        t.selectAll();
+        setMode("transform");
+        snapshot();
+        pushState();
+      }
+    });
+
+    canvas.on("mouse:move", function (opt) {
+      if (!isDown || !tempObj) return;
+      const p = canvas.getPointer(opt.e);
+
+      if (currentMode === "rect") {
+        tempObj.set({
+          left: Math.min(p.x, origX),
+          top: Math.min(p.y, origY),
+          width: Math.abs(p.x - origX),
+          height: Math.abs(p.y - origY)
+        });
+      } else if (currentMode === "circle") {
+        const r = Math.hypot(p.x - origX, p.y - origY);
+        tempObj.set({ radius: r, left: origX - r, top: origY - r });
+      } else if (currentMode === "line") {
+        tempObj.set({ x2: p.x, y2: p.y });
+      }
+      canvas.renderAll();
+    });
+
+    canvas.on("mouse:up", function () {
+      if (currentMode === "transform") {
+        isDown = false;
+        return;
+      }
+      if (!tempObj) { isDown = false; return; }
+
+      const minSize = 8;
+      const isTooSmall =
+        (currentMode === "rect" &&
+          (tempObj.width < minSize || tempObj.height < minSize)) ||
+        (currentMode === "circle" && tempObj.radius < minSize);
+
+      if (isTooSmall) {
+        canvas.remove(tempObj);
+      } else {
+        tempObj.set({
+          id: "user_" + Math.random().toString(36).slice(2, 10),
+          name:
+            currentMode === "rect" ? "Rectangle" :
+            currentMode === "circle" ? "Circle" :
+            currentMode === "line" ? "Line" : "Annotation",
+          equipment_type: "custom_box",
+          selectable: true,
+          evented: true
+        });
+      }
+
+      tempObj = null;
+      isDown = false;
+      canvas.renderAll();
+      snapshot();
+      pushState();
+    });
+
+    canvas.on("object:modified", function () {
+      snapshot();
+      pushState();
+    });
+    canvas.on("object:added", function (e) {
+      // Ignore the transient drawing objects (selectable=false)
+      if (e.target && e.target.selectable === false) return;
+      snapshot();
+      pushState();
+    });
+    canvas.on("object:removed", function () {
+      snapshot();
+      pushState();
+    });
+  }
+
+  // ============================================================
+  // Listen for Streamlit prop updates
+  // ============================================================
+  function wireStreamlitListener() {
+    window.addEventListener("message", function (ev) {
+      const d = ev.data;
+      if (!d || d.type !== "streamlit:render") return;
+      initCanvas(d.args || {});
+    });
+  }
+
+  // ============================================================
+  // Kick things off
+  // ============================================================
+  window.addEventListener("load", function () {
+    // Tell Streamlit we're alive so it sends the first render message.
+    setComponentReady();
+  });
+})();
+</script>
+</body>
+</html>
