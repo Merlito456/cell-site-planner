@@ -1,42 +1,3 @@
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<style>
-  html, body { margin:0; padding:0; background:#ffffff; overflow:hidden;
-               font-family: system-ui, sans-serif; }
-  #toolbar {
-    display:flex; gap:4px; padding:6px 8px;
-    background:#f4f6f9; border-bottom:1px solid #d8dee6;
-    align-items:center; font-size:12px;
-  }
-  #toolbar button {
-    padding:5px 12px; border:1px solid #c7cfda; background:#fff;
-    border-radius:4px; cursor:pointer; font-size:12px;
-    transition: all 0.1s;
-  }
-  #toolbar button:hover { background:#eef2f7; }
-  #toolbar button.active { background:#4A90D9; color:#fff; border-color:#3a78bb; }
-  #hint { color:#666; margin-left:auto; font-size:11px; }
-  #wrap { position:relative; }
-  .canvas-container { border:1px solid #e0e3e8; }
-</style>
-<script src="https://cdn.jsdelivr.net/npm/fabric@5.3.0/dist/fabric.min.js"></script>
-</head>
-<body>
-<div id="toolbar">
-  <button id="btn-select" class="active" title="Select / transform">Select</button>
-  <button id="btn-rect" title="Draw rectangle">▭ Rect</button>
-  <button id="btn-circle" title="Draw circle">○ Circle</button>
-  <button id="btn-line" title="Draw line">╱ Line</button>
-  <button id="btn-text" title="Add text">T Text</button>
-  <button id="btn-del" title="Delete selected">🗑 Delete</button>
-  <button id="btn-undo" title="Undo">↶ Undo</button>
-  <button id="btn-redo" title="Redo">↷ Redo</button>
-  <span id="hint">Drag to move · rotate from top handle · resize from corners</span>
-</div>
-<div id="wrap"><canvas id="c"></canvas></div>
-
 <script>
 (function() {
   const canvas = new fabric.Canvas('c', {
@@ -48,25 +9,23 @@
     stopContextMenu: true,
   });
 
-  // ---------- Load initial drawing once ----------
+  // ---------- Load initial drawing ----------
   const initial = __INITIAL__;
   if (initial && initial.objects && initial.objects.length > 0) {
-    canvas.loadFromJSON(initial, function() {
-      canvas.renderAll();
-    });
+    canvas.loadFromJSON(initial, function() { canvas.renderAll(); });
   } else {
     canvas.renderAll();
   }
 
-  // ---------- History (undo/redo) ----------
+  // ---------- History ----------
   const history = [];
   let historyIndex = -1;
   let isRestoring = false;
+  let suppressSync = true;   // don't push during initial load
 
   function snapshot() {
     if (isRestoring) return;
     const json = JSON.stringify(canvas.toJSON(['id','name','equipment_type','equip_height_3d']));
-    // Drop forward history
     history.splice(historyIndex + 1);
     history.push(json);
     historyIndex = history.length - 1;
@@ -79,12 +38,12 @@
     canvas.loadFromJSON(history[idx], function() {
       canvas.renderAll();
       isRestoring = false;
+      syncToParent();
     });
     historyIndex = idx;
   }
 
-  // Seed history after initial load
-  setTimeout(snapshot, 100);
+  setTimeout(() => { snapshot(); suppressSync = false; }, 150);
 
   document.getElementById('btn-undo').onclick = () => restore(historyIndex - 1);
   document.getElementById('btn-redo').onclick = () => restore(historyIndex + 1);
@@ -119,17 +78,17 @@
     canvas.discardActiveObject();
     canvas.renderAll();
     snapshot();
+    syncToParent();
   };
 
-  // ---------- Draw handlers ----------
+  // ---------- Drawing ----------
   let isDown = false, origX = 0, origY = 0, tempObj = null;
 
   canvas.on('mouse:down', function(opt) {
     if (currentMode === 'transform') return;
-    if (opt.target) return; // clicked an existing object
+    if (opt.target) return;
     const p = canvas.getPointer(opt.e);
-    isDown = true;
-    origX = p.x; origY = p.y;
+    isDown = true; origX = p.x; origY = p.y;
 
     if (currentMode === 'rect') {
       tempObj = new fabric.Rect({
@@ -153,16 +112,15 @@
       canvas.add(tempObj);
     } else if (currentMode === 'text') {
       const t = new fabric.IText('Double-click to edit', {
-        left: p.x, top: p.y,
-        fontSize: 16, fill: "__STROKE__",
+        left: p.x, top: p.y, fontSize: 16, fill: "__STROKE__",
         fontFamily: 'system-ui, sans-serif',
       });
       canvas.add(t);
       canvas.setActiveObject(t);
-      t.enterEditing();
-      t.selectAll();
+      t.enterEditing(); t.selectAll();
       setMode('transform');
       snapshot();
+      syncToParent();
     }
   });
 
@@ -193,7 +151,6 @@
     } else if (currentMode === 'circle' && tempObj.radius < minSize) {
       canvas.remove(tempObj);
     } else {
-      // Give freshly drawn object a stable id + metadata
       tempObj.set({
         id: 'user_' + Math.random().toString(36).slice(2, 10),
         name: currentMode === 'rect' ? 'Rectangle'
@@ -203,22 +160,38 @@
       });
       tempObj.set({ selectable: true, evented: true });
     }
-    tempObj = null;
-    isDown = false;
+    tempObj = null; isDown = false;
     canvas.renderAll();
     snapshot();
+    syncToParent();
   });
 
-  // History on every modification
-  canvas.on('object:modified', snapshot);
-  canvas.on('object:added', function(e) {
-    if (e.target && e.target.selectable === false) return; // temp drawing obj
-    snapshot();
-  });
+  canvas.on('object:modified', function() { snapshot(); syncToParent(); });
+  canvas.on('object:removed', function() { snapshot(); syncToParent(); });
 
-  // ---------- Expose the canvas to the parent window ----------
-  window.fabricCanvas = canvas;
+  // ---------- LIVE SYNC: push state to parent URL ----------
+  // Streamlit reads window.parent.location.search (st.query_params)
+  // on rerun. We debounce so rapid drag events don't spam the parent.
+  let syncTimer = null;
+  function syncToParent() {
+    if (suppressSync) return;
+    if (syncTimer) clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => {
+      try {
+        const json = JSON.stringify(canvas.toJSON(['id','name','equipment_type','equip_height_3d']));
+        const b64 = btoa(unescape(encodeURIComponent(json)));
+        // Preserve other query params, replace canvas_state
+        const url = new URL(window.parent.location.href);
+        url.searchParams.set('canvas_state', b64);
+        url.searchParams.set('canvas_ts', Date.now().toString());
+        // Use replaceState to avoid polluting history
+        window.parent.history.replaceState({}, '', url.toString());
+        // Force a Streamlit rerun by dispatching a popstate
+        window.parent.dispatchEvent(new PopStateEvent('popstate'));
+      } catch (e) {
+        console.warn('syncToParent failed', e);
+      }
+    }, 250); // debounce
+  }
 })();
 </script>
-</body>
-</html>
